@@ -1,8 +1,21 @@
-drone_ai_v1.zip
-grid_map_unified_task_results/ai_ppo_final_path.png
-__pycache__/main.cpython-310.pyc
-__pycache__/train_ai.cpython-310.pyc
-multi_v1.py
-multi_v2.py
-__pycache__/multi_path_plan.cpython-310.pyc
-__pycache__/a_star.cpython-310.pyc
+
+# ROS build outputs
+build/
+devel/
+install/
+log/
+logs/
+
+# ROS runtime files
+*.bag
+*.active
+*.mp4
+*.avi
+*.gif
+
+# lsc_dr_planner generated files
+lsc_dr_planner/log/*.csv
+lsc_dr_planner/missions/previous_missions/mission_*.json
+
+# editor
+.vscode/
