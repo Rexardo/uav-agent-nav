@@ -12,6 +12,7 @@ logs/
 *.mp4
 *.avi
 *.gif
+*.png
 
 # lsc_dr_planner generated files
 lsc_dr_planner/log/*.csv
