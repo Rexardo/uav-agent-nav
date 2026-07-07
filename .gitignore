@@ -24,3 +24,5 @@ lsc_dr_planner/missions/previous_missions/mission_*.json
 # python cache
 __pycache__
 multi-uav-planner/__pycache__
+
+.Ds_Store
