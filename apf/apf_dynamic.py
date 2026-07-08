@@ -1,0 +1,703 @@
+import heapq
+import math
+from collections import deque
+
+import numpy as np
+
+
+# Cache obstacle-distance maps so APF does not recompute them at every UAV step.
+# Key: grid shape + grid binary content.
+_DISTANCE_MAP_CACHE = {}
+
+
+MOTIONS_8 = [
+    (0, 1, 1.0), (0, -1, 1.0), (1, 0, 1.0), (-1, 0, 1.0),
+    (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)),
+    (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2)),
+]
+
+
+def _grid_to_array(grid_map):
+    """Convert list/array grid map to a 2D numpy int array."""
+    grid = np.asarray(grid_map, dtype=np.uint8)
+    if grid.ndim != 2:
+        raise ValueError("grid_map must be a 2D map, where 0 means free and 1 means obstacle.")
+    return grid
+
+
+def _clip_point(point, width, height):
+    """Clip a point into the map boundary."""
+    x = int(round(point[0]))
+    y = int(round(point[1]))
+    x = max(0, min(width - 1, x))
+    y = max(0, min(height - 1, y))
+    return x, y
+
+
+def _is_free(grid, x, y):
+    h, w = grid.shape
+    return 0 <= x < w and 0 <= y < h and grid[y, x] == 0
+
+
+def _nearest_free_cell(grid, start):
+    """
+    If start/goal falls inside an inflated obstacle, move it to the nearest free cell.
+    This avoids APF stopping immediately because the rounded grid cell is occupied.
+    """
+    h, w = grid.shape
+    sx, sy = _clip_point(start, w, h)
+
+    if _is_free(grid, sx, sy):
+        return sx, sy
+
+    queue = deque([(sx, sy)])
+    visited = {(sx, sy)}
+
+    while queue:
+        x, y = queue.popleft()
+        for dx, dy, _ in MOTIONS_8:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
+                if grid[ny, nx] == 0:
+                    return nx, ny
+                visited.add((nx, ny))
+                queue.append((nx, ny))
+
+    return None
+
+
+def _obstacle_distance_map(grid):
+    """
+    Compute approximate Euclidean distance from each cell to the nearest obstacle.
+
+    This is used only for repulsive potential. It is not a global path search.
+    Obstacles have distance 0. Free cells store the nearest obstacle distance.
+    """
+    h, w = grid.shape
+    key = (h, w, grid.tobytes())
+    if key in _DISTANCE_MAP_CACHE:
+        return _DISTANCE_MAP_CACHE[key]
+
+    dist = np.full((h, w), np.inf, dtype=float)
+    pq = []
+
+    obstacle_cells = np.argwhere(grid == 1)
+    if obstacle_cells.size == 0:
+        _DISTANCE_MAP_CACHE[key] = dist
+        return dist
+
+    for y, x in obstacle_cells:
+        dist[y, x] = 0.0
+        heapq.heappush(pq, (0.0, int(x), int(y)))
+
+    while pq:
+        d, x, y = heapq.heappop(pq)
+        if d > dist[y, x]:
+            continue
+
+        for dx, dy, step_cost in MOTIONS_8:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < w and 0 <= ny < h:
+                nd = d + step_cost
+                if nd < dist[ny, nx]:
+                    dist[ny, nx] = nd
+                    heapq.heappush(pq, (nd, nx, ny))
+
+    _DISTANCE_MAP_CACHE[key] = dist
+    return dist
+
+
+def _static_potential(x, y, goal, obstacle_dist, grid, k_att, k_rep, influence_radius):
+    """Attractive + static-obstacle repulsive potential at one grid cell."""
+    if grid[y, x] == 1:
+        return float("inf")
+
+    gx, gy = goal
+
+    # Attractive potential: pulls the UAV to the goal.
+    d_goal = math.hypot(x - gx, y - gy)
+    u_att = 0.5 * k_att * (d_goal ** 2)
+
+    # Repulsive potential: pushes the UAV away from static obstacles.
+    d_obs = obstacle_dist[y, x]
+    if d_obs <= 1e-9:
+        u_rep = float("inf")
+    elif d_obs <= influence_radius:
+        u_rep = 0.5 * k_rep * ((1.0 / d_obs) - (1.0 / influence_radius)) ** 2
+    else:
+        u_rep = 0.0
+
+    return u_att + u_rep
+
+
+def _predict_neighbor_position(dynamic_obstacle, future_step):
+    """
+    Get one neighbor's predicted position at a future step.
+
+    dynamic_obstacle format is the same as neighbors_info in multi_path_plan.py:
+    {
+        'id': int,
+        'pos': np.array([x, y]),
+        'path': list[np.array([x, y])],
+        'safe_radius': float,
+    }
+    """
+    path = dynamic_obstacle.get("path", [])
+    if path:
+        idx = min(max(0, future_step), len(path) - 1)
+        p = path[idx]
+    else:
+        p = dynamic_obstacle.get("pos", (0.0, 0.0))
+    return float(p[0]), float(p[1])
+
+
+def _priority_weight(own_id, other_id):
+    """
+    Break symmetric APF behavior with a simple priority rule.
+
+    Smaller ID has higher priority. A lower-priority UAV feels stronger repulsion from
+    a higher-priority UAV, which reduces head-on deadlock and mirror oscillation.
+    """
+    if own_id is None or other_id is None:
+        return 1.0
+    if own_id > other_id:
+        return 1.6
+    if own_id < other_id:
+        return 0.8
+    return 1.0
+
+
+def _dynamic_uav_potential(
+    x,
+    y,
+    future_step,
+    dynamic_obstacles=None,
+    own_safe_radius=0.8,
+    own_id=None,
+    k_dynamic=180.0,
+    dynamic_influence_radius=7.0,
+    safety_margin=0.5,
+    collision_penalty=6000.0,
+):
+    """Repulsive potential generated by neighboring UAVs and their predicted paths."""
+    if not dynamic_obstacles:
+        return 0.0
+
+    total = 0.0
+    px, py = float(x), float(y)
+
+    for obs in dynamic_obstacles:
+        ox, oy = _predict_neighbor_position(obs, future_step)
+        other_safe_radius = float(obs.get("safe_radius", own_safe_radius))
+        safe_dist = own_safe_radius + other_safe_radius + safety_margin
+        influence = max(dynamic_influence_radius, safe_dist + 1.0)
+        d = math.hypot(px - ox, py - oy)
+        w = _priority_weight(own_id, obs.get("id"))
+
+        # Hard collision zone: very large penalty.
+        if d < safe_dist:
+            total += w * collision_penalty * (safe_dist - d + 1.0) ** 2
+
+        # Soft APF repulsive zone.
+        if d <= 1e-9:
+            total += w * collision_penalty * 10.0
+        elif d < influence:
+            total += w * 0.5 * k_dynamic * ((1.0 / d) - (1.0 / influence)) ** 2
+
+    return total
+
+
+def _head_on_swap_penalty(
+    current_cell,
+    candidate_cell,
+    future_step,
+    dynamic_obstacles=None,
+    own_safe_radius=0.8,
+    own_id=None,
+    safety_margin=0.5,
+    swap_penalty=8000.0,
+):
+    """
+    Penalize edge-swap conflicts.
+
+    Example: UAV A moves from p -> q while UAV B moves from q -> p. Pure position
+    repulsion may miss this if only same-time future cells are compared.
+    """
+    if not dynamic_obstacles:
+        return 0.0
+
+    cx, cy = current_cell
+    nx, ny = candidate_cell
+    total = 0.0
+
+    for obs in dynamic_obstacles:
+        other_now = obs.get("pos", None)
+        if other_now is None:
+            continue
+
+        other_next = _predict_neighbor_position(obs, future_step)
+        other_safe_radius = float(obs.get("safe_radius", own_safe_radius))
+        safe_dist = own_safe_radius + other_safe_radius + safety_margin
+        w = _priority_weight(own_id, obs.get("id"))
+
+        candidate_to_other_now = math.hypot(nx - float(other_now[0]), ny - float(other_now[1]))
+        current_to_other_next = math.hypot(cx - other_next[0], cy - other_next[1])
+
+        if candidate_to_other_now < safe_dist and current_to_other_next < safe_dist:
+            total += w * swap_penalty
+
+    return total
+
+
+def _total_potential(
+    x,
+    y,
+    future_step,
+    goal,
+    obstacle_dist,
+    grid,
+    k_att,
+    k_rep,
+    influence_radius,
+    dynamic_obstacles=None,
+    own_safe_radius=0.8,
+    own_id=None,
+    k_dynamic=180.0,
+    dynamic_influence_radius=7.0,
+    safety_margin=0.5,
+    collision_penalty=6000.0,
+):
+    """Total APF potential: goal attraction + static obstacle repulsion + UAV repulsion."""
+    u_static = _static_potential(x, y, goal, obstacle_dist, grid, k_att, k_rep, influence_radius)
+    if not math.isfinite(u_static):
+        return float("inf")
+
+    u_dynamic = _dynamic_uav_potential(
+        x=x,
+        y=y,
+        future_step=future_step,
+        dynamic_obstacles=dynamic_obstacles,
+        own_safe_radius=own_safe_radius,
+        own_id=own_id,
+        k_dynamic=k_dynamic,
+        dynamic_influence_radius=dynamic_influence_radius,
+        safety_margin=safety_margin,
+        collision_penalty=collision_penalty,
+    )
+
+    return u_static + u_dynamic
+
+
+def _erase_loops(path):
+    """Remove repeated-cell loops from the generated grid path."""
+    new_path = []
+    index = {}
+
+    for p in path:
+        if p in index:
+            keep_until = index[p]
+            new_path = new_path[:keep_until + 1]
+            index = {cell: i for i, cell in enumerate(new_path)}
+        else:
+            index[p] = len(new_path)
+            new_path.append(p)
+
+    return new_path
+
+
+def _local_escape_path(
+    current,
+    goal,
+    grid,
+    obstacle_dist,
+    recent_cells,
+    visit_count,
+    radius=10,
+    dynamic_obstacles=None,
+    external_avoid_cells=None,
+    external_avoid_penalty=80.0,
+    future_step=0,
+    own_safe_radius=0.8,
+    own_id=None,
+    k_dynamic=180.0,
+    dynamic_influence_radius=7.0,
+    safety_margin=0.5,
+    collision_penalty=6000.0,
+):
+    """
+    Find a short local escape path when the APF gradient is trapped.
+
+    This remains a local trap-escape helper, not a full global A* search. Dynamic
+    UAV repulsion is also used when selecting the local escape target.
+    """
+    h, w = grid.shape
+    cx, cy = current
+    external_avoid_cells = external_avoid_cells if external_avoid_cells else set()
+
+    queue = deque([current])
+    parent = {current: None}
+    depth = {current: 0}
+    candidates = []
+
+    while queue:
+        x, y = queue.popleft()
+        d = depth[(x, y)]
+
+        if d > 0:
+            step = future_step + d - 1
+            goal_dist = math.hypot(x - goal[0], y - goal[1])
+            clearance = obstacle_dist[y, x] if np.isfinite(obstacle_dist[y, x]) else radius
+            clearance = min(clearance, radius)
+            dynamic_u = _dynamic_uav_potential(
+                x=x,
+                y=y,
+                future_step=step,
+                dynamic_obstacles=dynamic_obstacles,
+                own_safe_radius=own_safe_radius,
+                own_id=own_id,
+                k_dynamic=k_dynamic,
+                dynamic_influence_radius=dynamic_influence_radius,
+                safety_margin=safety_margin,
+                collision_penalty=collision_penalty,
+            )
+
+            # In a U-shaped local minimum, the correct escape move may be
+            # temporarily farther from the goal. Therefore the escape target is
+            # selected mainly by total potential and obstacle/UAV clearance, not
+            # by shortest distance to the goal.
+            total_u = _static_potential(x, y, goal, obstacle_dist, grid, 1.0, 80.0, 5.0) + dynamic_u
+            score = total_u
+            score += 0.02 * d
+            score -= 1.0 * clearance
+            score += 8.0 * visit_count.get((x, y), 0)
+            if (x, y) in recent_cells:
+                score += 30.0
+            if (x, y) in external_avoid_cells:
+                score += external_avoid_penalty
+
+            candidates.append((score, (x, y)))
+
+        if d >= radius:
+            continue
+
+        for dx, dy, _ in MOTIONS_8:
+            nx, ny = x + dx, y + dy
+            if not _is_free(grid, nx, ny):
+                continue
+            if abs(nx - cx) > radius or abs(ny - cy) > radius:
+                continue
+            if (nx, ny) in parent:
+                continue
+            parent[(nx, ny)] = (x, y)
+            depth[(nx, ny)] = d + 1
+            queue.append((nx, ny))
+
+    if not candidates:
+        return []
+
+    _, target = min(candidates, key=lambda item: item[0])
+
+    path = []
+    node = target
+    while node is not None:
+        path.append(node)
+        node = parent[node]
+    path.reverse()
+    return path
+
+
+def apf(
+    start_pos,
+    goal_pos,
+    grid_map,
+    k_att=1.0,
+    k_rep=80.0,
+    influence_radius=5.0,
+    max_iterations=None,
+    goal_tolerance=0.5,
+    visited_penalty=8.0,
+    recent_penalty=30.0,
+    return_partial=True,
+    escape_radius=20,
+    dynamic_obstacles=None,
+    own_safe_radius=0.8,
+    own_id=None,
+    k_dynamic=180.0,
+    dynamic_influence_radius=7.0,
+    safety_margin=0.5,
+    collision_penalty=6000.0,
+    swap_penalty=8000.0,
+    external_avoid_cells=None,
+    external_avoid_penalty=80.0,
+):
+    """
+    Artificial Potential Field path planner with dynamic UAV repulsion.
+
+    Parameters
+    ----------
+    start_pos : tuple/list
+        Start grid point (x, y).
+    goal_pos : tuple/list
+        Goal grid point (x, y).
+    grid_map : list[list[int]] or np.ndarray
+        2D grid map. 0 means free space, 1 means obstacle.
+    k_att : float
+        Attractive potential coefficient.
+    k_rep : float
+        Static-obstacle repulsive potential coefficient.
+    influence_radius : float
+        Static obstacle influence distance.
+    dynamic_obstacles : list[dict] or None
+        Neighbor UAV information. Each item may contain id, pos, path, safe_radius.
+        If None, APF degenerates to the previous static-obstacle-only version.
+    own_safe_radius : float
+        Safe radius of the current UAV.
+    own_id : int or None
+        Current UAV ID. Used for priority-based symmetry breaking.
+    k_dynamic : float
+        Dynamic UAV repulsive potential coefficient.
+    dynamic_influence_radius : float
+        Neighbor UAV influence distance.
+    safety_margin : float
+        Extra distance added to the sum of two UAV safe radii.
+    collision_penalty : float
+        Large penalty used when a candidate cell violates safe distance.
+    swap_penalty : float
+        Penalty for head-on edge swap conflicts.
+    external_avoid_cells : set/list or None
+        Recent cells from previous planning cycles. This gives APF cross-cycle memory
+        and reduces back-and-forth oscillation.
+    external_avoid_penalty : float
+        Penalty added to external_avoid_cells.
+    max_iterations : int or None
+        Maximum APF descent steps. If None, use width * height.
+    goal_tolerance : float
+        Stop when the current cell is within this distance from the goal.
+    visited_penalty : float
+        Penalty for repeatedly visiting the same cell. Helps escape local minima.
+    recent_penalty : float
+        Extra penalty for going back to very recent cells. Helps reduce oscillation.
+    return_partial : bool
+        If True, return the best partial path when APF does not reach the goal.
+        This is useful in receding-horizon simulation, because multi_path_plan.py replans every step.
+    escape_radius : int
+        Local search radius used only when APF falls into a local minimum.
+
+    Returns
+    -------
+    path : list[tuple[int, int]]
+        Grid path from start toward goal. If planning fails and return_partial=False, return [].
+    """
+    grid = _grid_to_array(grid_map)
+    height, width = grid.shape
+
+    start = _nearest_free_cell(grid, start_pos)
+    goal = _nearest_free_cell(grid, goal_pos)
+
+    if start is None or goal is None:
+        return []
+
+    if start == goal:
+        return [start]
+
+    if max_iterations is None:
+        max_iterations = width * height
+
+    obstacle_dist = _obstacle_distance_map(grid)
+
+    current = start
+    path = [current]
+    visit_count = {current: 1}
+    recent_cells = deque([current], maxlen=8)
+    external_avoid_cells = set(external_avoid_cells) if external_avoid_cells else set()
+    escape_queue = deque()
+
+    best_cell = current
+    best_goal_dist = math.hypot(current[0] - goal[0], current[1] - goal[1])
+    best_path = list(path)
+
+    for _ in range(max_iterations):
+        cx, cy = current
+
+        if math.hypot(cx - goal[0], cy - goal[1]) <= goal_tolerance:
+            if current != goal:
+                path.append(goal)
+            return _erase_loops(path)
+
+        # Candidate represents the next future point. Step 0 means the next motion.
+        future_step = max(0, len(path) - 1)
+
+        current_potential = _total_potential(
+            x=cx,
+            y=cy,
+            future_step=future_step,
+            goal=goal,
+            obstacle_dist=obstacle_dist,
+            grid=grid,
+            k_att=k_att,
+            k_rep=k_rep,
+            influence_radius=influence_radius,
+            dynamic_obstacles=dynamic_obstacles,
+            own_safe_radius=own_safe_radius,
+            own_id=own_id,
+            k_dynamic=k_dynamic,
+            dynamic_influence_radius=dynamic_influence_radius,
+            safety_margin=safety_margin,
+            collision_penalty=collision_penalty,
+        )
+        candidates = []
+
+        for dx, dy, step_cost in MOTIONS_8:
+            nx, ny = cx + dx, cy + dy
+            if not _is_free(grid, nx, ny):
+                continue
+
+            u = _total_potential(
+                x=nx,
+                y=ny,
+                future_step=future_step,
+                goal=goal,
+                obstacle_dist=obstacle_dist,
+                grid=grid,
+                k_att=k_att,
+                k_rep=k_rep,
+                influence_radius=influence_radius,
+                dynamic_obstacles=dynamic_obstacles,
+                own_safe_radius=own_safe_radius,
+                own_id=own_id,
+                k_dynamic=k_dynamic,
+                dynamic_influence_radius=dynamic_influence_radius,
+                safety_margin=safety_margin,
+                collision_penalty=collision_penalty,
+            )
+            d_goal = math.hypot(nx - goal[0], ny - goal[1])
+
+            score = u
+            score += 0.05 * step_cost
+            score += visited_penalty * visit_count.get((nx, ny), 0)
+            if (nx, ny) in external_avoid_cells:
+                score += external_avoid_penalty
+            score += _head_on_swap_penalty(
+                current_cell=current,
+                candidate_cell=(nx, ny),
+                future_step=future_step,
+                dynamic_obstacles=dynamic_obstacles,
+                own_safe_radius=own_safe_radius,
+                own_id=own_id,
+                safety_margin=safety_margin,
+                swap_penalty=swap_penalty,
+            )
+            if (nx, ny) in recent_cells:
+                score += recent_penalty
+
+            candidates.append({
+                "cell": (nx, ny),
+                "potential": u,
+                "goal_dist": d_goal,
+                "score": score,
+            })
+
+        if not candidates:
+            break
+
+        # Normal APF behavior: choose a lower-potential neighbor.
+        downhill = [c for c in candidates if c["potential"] < current_potential - 1e-9]
+
+        if escape_queue:
+            # Continue a previously selected local escape segment.
+            next_cell = escape_queue.popleft()
+        elif downhill:
+            next_cell = min(downhill, key=lambda c: (c["score"], c["goal_dist"]))["cell"]
+        else:
+            # Local-minimum escape. APF is still the main planner, but this short
+            # local BFS segment prevents immediate oscillation in U-shaped obstacles.
+            escape_path = _local_escape_path(
+                current=current,
+                goal=goal,
+                grid=grid,
+                obstacle_dist=obstacle_dist,
+                recent_cells=set(recent_cells),
+                visit_count=visit_count,
+                radius=escape_radius,
+                dynamic_obstacles=dynamic_obstacles,
+                external_avoid_cells=external_avoid_cells,
+                external_avoid_penalty=external_avoid_penalty,
+                future_step=future_step,
+                own_safe_radius=own_safe_radius,
+                own_id=own_id,
+                k_dynamic=k_dynamic,
+                dynamic_influence_radius=dynamic_influence_radius,
+                safety_margin=safety_margin,
+                collision_penalty=collision_penalty,
+            )
+            if len(escape_path) > 1:
+                escape_queue = deque(escape_path[2:])
+                next_cell = escape_path[1]
+            else:
+                next_cell = min(candidates, key=lambda c: (c["score"], c["goal_dist"]))["cell"]
+
+        current = next_cell
+        path.append(current)
+        visit_count[current] = visit_count.get(current, 0) + 1
+        recent_cells.append(current)
+
+        current_goal_dist = math.hypot(current[0] - goal[0], current[1] - goal[1])
+        if current_goal_dist < best_goal_dist:
+            best_goal_dist = current_goal_dist
+            best_cell = current
+            best_path = list(path)
+
+        # If one cell is visited too many times, clear the escape queue and keep trying
+        # until max_iterations. This is intentionally more tolerant than pure APF.
+        if visit_count[current] > 10:
+            escape_queue.clear()
+
+    if return_partial:
+        # Prefer the path that got closest to the goal. If APF has not yet made
+        # goal-distance progress, still return the generated escape path so the
+        # receding-horizon controller can move out of the local minimum.
+        partial = best_path if best_cell != start else path
+        partial = _erase_loops(partial)
+        if len(partial) > 1:
+            return partial
+
+    return []
+
+
+# ==========================================
+# Simple test
+# ==========================================
+if __name__ == "__main__":
+    grid = [[0 for _ in range(20)] for _ in range(20)]
+
+    for i in range(5, 15):
+        grid[i][10] = 1
+    grid[14][11] = 1
+    grid[14][12] = 1
+
+    start = (2, 2)
+    goal = (18, 12)
+
+    dynamic = [
+        {"id": 2, "pos": np.array([5.0, 5.0]), "path": [np.array([6.0, 6.0])], "safe_radius": 0.8}
+    ]
+    path = apf(start, goal, grid, dynamic_obstacles=dynamic, own_safe_radius=0.8, own_id=1)
+
+    if path:
+        print("APF path found/partial path length:", len(path))
+        for y in range(20):
+            row_str = ""
+            for x in range(20):
+                if (x, y) == start:
+                    row_str += " S "
+                elif (x, y) == goal:
+                    row_str += " G "
+                elif (x, y) in path:
+                    row_str += " * "
+                elif grid[y][x] == 1:
+                    row_str += "███"
+                else:
+                    row_str += " . "
+            print(row_str)
+    else:
+        print("APF failed to find a path.")
