@@ -9,7 +9,7 @@ def calculate_obstacle_density(width, height, circles=None, rectangles=None, inf
     Calculate obstacle density on a discrete grid.
 
     0 means free space, 1 means obstacle.
-    This function is kept inside map_generator.py to avoid circular import with multi_path_plan.py.
+    This function is kept inside map_generator.py to avoid circular import with basic.py.
     """
     circles = circles if circles else []
     rectangles = rectangles if rectangles else []
@@ -50,7 +50,7 @@ def generate_test_map(width=50, height=50, num_obstacles=50, seed=None, safe_zon
     seed : int or None
         Random seed. Use a fixed seed if you want repeatable maps.
     safe_zone_size : int
-        Four corner areas reserved for UAV start/goal positions.
+        Two corner areas reserved for UAV start/goal positions.
 
     Returns
     -------
@@ -69,8 +69,6 @@ def generate_test_map(width=50, height=50, num_obstacles=50, seed=None, safe_zon
 
     safe_zones = [
         (0, 0, safe_zone_size, safe_zone_size),
-        (width - safe_zone_size, height - safe_zone_size, width, height),
-        (0, height - safe_zone_size, safe_zone_size, height),
         (width - safe_zone_size, 0, width, safe_zone_size),
     ]
 
@@ -116,7 +114,7 @@ def generate_test_map(width=50, height=50, num_obstacles=50, seed=None, safe_zon
 def visualize_generated_maps(num_maps=5, width=50, height=50, num_obstacles=50, seed=None):
     """
     Optional visualization tool for checking random maps.
-    This is not required by multi_path_plan.py.
+    This is not required by path planner the main test function.
     """
     fig, axes = plt.subplots(1, num_maps, figsize=(5 * num_maps, 5))
     if num_maps == 1:
@@ -159,8 +157,6 @@ def visualize_generated_maps(num_maps=5, width=50, height=50, num_obstacles=50, 
         safe_zone_size = 10
         safe_zones = [
             (0, 0),
-            (width - safe_zone_size, height - safe_zone_size),
-            (0, height - safe_zone_size),
             (width - safe_zone_size, 0),
         ]
         for sx, sy in safe_zones:
@@ -181,4 +177,4 @@ def visualize_generated_maps(num_maps=5, width=50, height=50, num_obstacles=50, 
 
 
 if __name__ == "__main__":
-    visualize_generated_maps(num_maps=5, width=50, height=50, num_obstacles=50, seed=42)
+    visualize_generated_maps(num_maps=5, width=50, height=50, num_obstacles=50, seed=None)
