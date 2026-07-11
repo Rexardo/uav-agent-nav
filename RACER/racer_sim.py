@@ -37,9 +37,7 @@ from racer_planner import (
 from racer_path_searching import (
     astar,
     kinodynamic_astar,
-    future_position,
     path_is_free,
-    shortcut_path,
 )
 from racer_trajectory import densify_grid_path, smooth_trajectory
 from racer_types import FREE, OBSTACLE, RACERConfig, UAV
@@ -71,9 +69,9 @@ class RACERSimulator:
             "fallback_plan_count": 0,
             "astar_polyline_count": 0,
             "bspline_plan_count": 0,
-            "reciprocal_collision_count": 0,
-            "reciprocal_replan_count": 0,
-            "unresolved_collision_count": 0,
+            "swarm_collision_count": 0,
+            "swarm_replan_count": 0,
+            "swarm_replan_failure_count": 0,
             "static_collision_replan_count": 0,
             "static_collision_stop_count": 0,
         }
@@ -112,7 +110,7 @@ class RACERSimulator:
                     self.render(show, ax, step_idx, final_ratio, force=True)
                     break
 
-            self.resolve_conflicts()
+            self.resolve_swarm_conflicts()
             movable = [uav for uav in self.uavs if uav.path]
             if not movable:
                 self.render(show, ax, step_idx, final_ratio, force=True)
@@ -188,37 +186,44 @@ class RACERSimulator:
                 self.exploration_finished_step = step_idx
 
     def return_home_tick(self) -> None:
+        snapshots = self.swarm_trajectory_snapshots()
         for uav, known_map in zip(self.uavs, self.known_maps):
             if uav.pos == uav.start:
                 uav.set_plan(uav.start, [])
                 continue
             if uav.path and uav.target == uav.start:
                 continue
-            path = self.plan_return_path(uav, known_map)
+            other_paths = [path for index, path in enumerate(snapshots) if index != uav.id - 1]
+            path = self.plan_trajectory_to_target(uav, known_map, uav.start, other_paths)
             uav.set_plan(uav.start, path)
             if path:
-                self.stats["astar_polyline_count"] += 1
+                self.stats["bspline_plan_count"] += 1
 
-    def plan_return_path(self, uav: UAV, known_map: KnownMap) -> list[tuple[int, int]]:
-        """
-        Build a conservative home path.
+    def plan_trajectory_to_target(
+        self,
+        uav: UAV,
+        known_map: KnownMap,
+        target: tuple[int, int],
+        swarm_paths: list[list[tuple[int, int]]],
+    ) -> list[tuple[int, int]]:
+        """Plan independently while treating received swarm trajectories as a soft cost."""
+        grid = planning_grid_for_uav(known_map, self.config, uav)
+        guide = []
+        if self.config.use_kinodynamic_astar:
+            guide = kinodynamic_astar(uav.pos, uav.velocity, target, grid, self.config)
+        if not guide:
+            guide = astar(uav.pos, target, grid, self.config)
+        if len(guide) <= 1:
+            return []
 
-        Return-home is an execution safety problem, not an exploration-speed
-        problem.  Use single-cell A* so the path that is planned is the same
-        path that the executor checks and follows.
-        """
-        grids = [
-            planning_grid_for_uav(known_map, self.config, uav),
-            planning_grid_from_known_map(known_map, self.config),
-            planning_grid_from_known_map(known_map, self.config, block_unknown=False),
-        ]
-        for grid in grids:
-            path = densify_grid_path(astar(uav.pos, uav.start, grid, self.config))
-            if len(path) <= 1:
-                continue
-            if self.first_geometric_unsafe_cell(path) is None and path_is_free(path, grid):
-                return path
-        return []
+        guide = densify_grid_path(guide)
+        soft_grid = planning_grid_from_known_map(known_map, self.config, block_unknown=False)
+        path = smooth_trajectory(guide, grid, self.config, soft_grid, swarm_paths)
+        if not path:
+            return []
+        if self.first_geometric_unsafe_cell([uav.pos] + path) is not None:
+            return []
+        return path if path_is_free([uav.pos] + path, grid, include_start=False) else []
 
     def update_progress_monitor(self, uav: UAV, newly_known: int) -> None:
         moved = math.hypot(uav.pos[0] - uav.last_progress_pos[0], uav.pos[1] - uav.last_progress_pos[1])
@@ -283,20 +288,9 @@ class RACERSimulator:
             if uav.target is None:
                 self.stop_unsafe_uav(uav)
                 continue
-            if self.phase == "return_home" and uav.target == uav.start:
-                replanned = self.plan_return_path(uav, known_map)
-                if replanned:
-                    uav.set_plan(uav.target, replanned)
-                    continue
-                self.stop_unsafe_uav(uav)
-                continue
-            replanned = []
-            if self.config.use_kinodynamic_astar:
-                replanned = kinodynamic_astar(uav.pos, uav.velocity, uav.target, safety_grid, self.config)
-            if not replanned:
-                replanned = astar(uav.pos, uav.target, safety_grid, self.config)
-            soft_grid = planning_grid_from_known_map(known_map, self.config, block_unknown=False)
-            replanned = smooth_trajectory(shortcut_path(replanned, safety_grid, self.config), safety_grid, self.config, soft_grid)
+            snapshots = self.swarm_trajectory_snapshots()
+            other_paths = [path for index, path in enumerate(snapshots) if index != uav.id - 1]
+            replanned = self.plan_trajectory_to_target(uav, known_map, uav.target, other_paths)
             candidate = [uav.pos] + replanned[: max(1, self.config.execution_check_horizon)]
             if replanned and self.first_geometric_unsafe_cell(candidate) is None and path_is_free(candidate, safety_grid, include_start=False):
                 uav.set_plan(uav.target, replanned)
@@ -339,60 +333,55 @@ class RACERSimulator:
             self.stop_unsafe_uav(uav)
 
     def stop_unsafe_uav(self, uav: UAV) -> None:
-        blacklist_target(uav, uav.target, self.config)
-        uav.set_plan(None, [])
+        # Official RACER hovers after a failed replan and retries the same target.
+        uav.set_plan(uav.target, [])
         self.stats["static_collision_stop_count"] += 1
 
-    def resolve_conflicts(self) -> None:
-        for _ in range(max(1, self.config.reciprocal_replan_rounds)):
-            conflict = self.first_future_conflict()
-            if conflict is None:
-                return
-            a, b = conflict
-            self.stats["reciprocal_collision_count"] += 1
-            loser = self.uavs[max(a, b)]
-            known_map = self.known_maps[loser.id - 1]
-            dynamic = set(self.uavs[min(a, b)].path[: self.config.future_path_horizon])
-            if self.uavs[min(a, b)].pos:
-                dynamic.add(self.uavs[min(a, b)].pos)
-            if loser.target is None:
-                self.stats["unresolved_collision_count"] += 1
-                return
-            if self.phase == "return_home" and loser.target == loser.start:
-                path = self.plan_return_path(loser, known_map)
-                if path:
-                    loser.set_plan(loser.target, path)
-                    self.stats["reciprocal_replan_count"] += 1
-                else:
-                    self.stats["unresolved_collision_count"] += 1
-                    loser.set_plan(loser.target, [])
-                return
-            grid = planning_grid_for_uav(known_map, self.config, loser, dynamic)
-            soft_grid = planning_grid_from_known_map(known_map, self.config, dynamic, block_unknown=False)
-            path = []
-            if self.config.use_kinodynamic_astar:
-                path = kinodynamic_astar(loser.pos, loser.velocity, loser.target, grid, self.config)
-            if not path:
-                path = astar(loser.pos, loser.target, grid, self.config)
-            path = smooth_trajectory(shortcut_path(path, grid, self.config), grid, self.config, soft_grid)
-            if path:
-                loser.set_plan(loser.target, path)
-                self.stats["reciprocal_replan_count"] += 1
-            else:
-                self.stats["unresolved_collision_count"] += 1
-                loser.set_plan(loser.target, [])
-                return
+    def swarm_trajectory_snapshots(self) -> list[list[tuple[int, int]]]:
+        """Represent the newest trajectory broadcast by every UAV."""
+        return [[uav.pos] + list(uav.path) for uav in self.uavs]
 
-    def first_future_conflict(self) -> tuple[int, int] | None:
-        horizon = max(1, self.config.future_path_horizon)
-        for step in range(horizon):
-            positions = [future_position(uav, step) for uav in self.uavs]
-            for i in range(len(positions)):
-                for j in range(i + 1, len(positions)):
-                    min_dist = self.uavs[i].safe_radius + self.uavs[j].safe_radius + self.config.conflict_margin
-                    if math.hypot(positions[i][0] - positions[j][0], positions[i][1] - positions[j][1]) < min_dist:
-                        return i, j
-        return None
+    def detect_swarm_collision_pairs(
+        self,
+        snapshots: list[list[tuple[int, int]]],
+    ) -> list[tuple[int, int]]:
+        """Check time-aligned trajectory samples, matching official RACER's callback."""
+        threshold = self.config.meters_to_cells(self.config.swarm_collision_check_distance)
+        collisions = []
+        for i in range(len(snapshots)):
+            for j in range(i + 1, len(snapshots)):
+                overlap = min(len(snapshots[i]), len(snapshots[j]))
+                for step in range(overlap):
+                    first = snapshots[i][step]
+                    second = snapshots[j][step]
+                    if math.hypot(first[0] - second[0], first[1] - second[1]) < threshold:
+                        collisions.append((i, j))
+                        break
+        return collisions
+
+    def resolve_swarm_conflicts(self) -> None:
+        """Independently replan every colliding UAV with no winner/loser arbitration."""
+        snapshots = self.swarm_trajectory_snapshots()
+        collisions = self.detect_swarm_collision_pairs(snapshots)
+        if not collisions:
+            return
+
+        self.stats["swarm_collision_count"] += len(collisions)
+        colliding_indices = sorted({index for pair in collisions for index in pair})
+        for index in colliding_indices:
+            uav = self.uavs[index]
+            if uav.target is None:
+                uav.set_plan(uav.target, [])
+                self.stats["swarm_replan_failure_count"] += 1
+                continue
+            other_paths = [path for other_index, path in enumerate(snapshots) if other_index != index]
+            path = self.plan_trajectory_to_target(uav, self.known_maps[index], uav.target, other_paths)
+            if path:
+                uav.set_plan(uav.target, path)
+                self.stats["swarm_replan_count"] += 1
+            else:
+                uav.set_plan(uav.target, [])
+                self.stats["swarm_replan_failure_count"] += 1
 
     def render(self, show: bool, ax, step_idx: int, known_ratio: float, force: bool = False) -> None:
         if not show or ax is None or plt is None:

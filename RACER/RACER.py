@@ -12,6 +12,13 @@ from racer_types import RACERConfig
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Modular RACER multi-UAV exploration demo.")
     parser.add_argument("--no-show", action="store_true")
+    parser.add_argument(
+        "--map-id",
+        type=int,
+        choices=(1, 2),
+        default=RACERConfig.map_id,
+        help="1: original random map; 2: fixed four-UAV dense maze.",
+    )
     parser.add_argument("--seed", type=int, default=RACERConfig.random_seed)
     parser.add_argument("--num-uavs", type=int, default=RACERConfig.num_uavs)
     parser.add_argument("--obstacle-count", type=int, default=RACERConfig.obstacle_count)
@@ -28,6 +35,7 @@ def parse_args() -> argparse.Namespace:
 
 def config_from_args(args: argparse.Namespace) -> RACERConfig:
     return RACERConfig(
+        map_id=args.map_id,
         random_seed=args.seed,
         num_uavs=args.num_uavs,
         obstacle_count=args.obstacle_count,
@@ -60,9 +68,9 @@ def format_result(result: dict[str, Any]) -> str:
         f"pairwise_success_count={result['pairwise_success_count']}, "
         f"astar_polyline_count={result['astar_polyline_count']}, "
         f"bspline_plan_count={result['bspline_plan_count']}, "
-        f"reciprocal_collision_count={result['reciprocal_collision_count']}, "
-        f"reciprocal_replan_count={result['reciprocal_replan_count']}, "
-        f"unresolved_collision_count={result['unresolved_collision_count']}, "
+        f"swarm_collision_count={result['swarm_collision_count']}, "
+        f"swarm_replan_count={result['swarm_replan_count']}, "
+        f"swarm_replan_failure_count={result['swarm_replan_failure_count']}, "
         f"static_collision_replan_count={result['static_collision_replan_count']}, "
         f"static_collision_stop_count={result['static_collision_stop_count']}, "
         f"home_flags={result['home_flags']}, "

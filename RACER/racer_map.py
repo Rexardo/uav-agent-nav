@@ -9,8 +9,23 @@ import numpy as np
 
 from racer_types import FREE, OBSTACLE, UNKNOWN, RACERConfig, UAV
 
+
+def dense_maze_layout(config: RACERConfig) -> tuple[int, int, int, int, int]:
+    """Return origin, coarse dimensions, and pitch for the fixed dense maze."""
+    if config.width < 40 or config.height < 40:
+        raise ValueError("Map 2 requires width and height of at least 40 cells.")
+    pitch = 5  # Three free cells followed by a two-cell wall.
+    columns = (config.width - 2) // pitch
+    rows = (config.height - 2) // pitch
+    maze_width = columns * 3 + (columns - 1) * 2
+    maze_height = rows * 3 + (rows - 1) * 2
+    origin_x = (config.width - maze_width) // 2
+    origin_y = (config.height - maze_height) // 2
+    return origin_x, origin_y, columns, rows, pitch
+
+
 class GridWorld:
-    """Random obstacle map using the same circle/rectangle style as hgrid.py."""
+    """Selectable obstacle map using circle/rectangle geometry."""
 
     def __init__(self, config: RACERConfig):
         self.config = config
@@ -23,6 +38,16 @@ class GridWorld:
         self._clear_launch_area(self.true_map)
 
     def _generate_obstacles(self) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float, float]]]:
+        # 地图 1：原来的随机障碍物地图。
+        if self.config.map_id == 1:
+            return self._generate_random_obstacles()
+        # 地图 2：固定 Dense Maze。三格宽长通道、密集直角转弯、盲巷和
+        # 少量环路用于测试多机在狭窄迷宫中的轨迹冲突与死锁。
+        if self.config.map_id == 2:
+            return self._generate_dense_maze_obstacles()
+        raise ValueError(f"Unsupported map_id={self.config.map_id}; expected 1 or 2.")
+
+    def _generate_random_obstacles(self) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float, float]]]:
         rng = random.Random(self.config.random_seed)
         circles: list[tuple[float, float, float]] = []
         rectangles: list[tuple[float, float, float, float]] = []
@@ -45,6 +70,112 @@ class GridWorld:
 
         return circles, rectangles
 
+    def _generate_dense_maze_obstacles(self) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float, float]]]:
+        """Build a reproducible connected maze with four side entrances."""
+        origin_x, origin_y, columns, rows, pitch = dense_maze_layout(self.config)
+        grid = np.ones((self.height, self.width), dtype=np.int8)
+
+        def chamber_origin(cell: tuple[int, int]) -> tuple[int, int]:
+            column, row = cell
+            return origin_x + column * pitch, origin_y + row * pitch
+
+        def carve_chamber(cell: tuple[int, int]) -> None:
+            x, y = chamber_origin(cell)
+            grid[y : y + 3, x : x + 3] = FREE
+
+        def carve_connection(first: tuple[int, int], second: tuple[int, int]) -> None:
+            x1, y1 = chamber_origin(first)
+            x2, y2 = chamber_origin(second)
+            if x1 == x2:
+                y = min(y1, y2) + 3
+                grid[y : y + 2, x1 : x1 + 3] = FREE
+            else:
+                x = min(x1, x2) + 3
+                grid[y1 : y1 + 3, x : x + 2] = FREE
+
+        for row in range(rows):
+            for column in range(columns):
+                carve_chamber((column, row))
+
+        rng = random.Random(20240711)
+        visited = {(0, 0)}
+        stack = [(0, 0)]
+        tree_edges: set[frozenset[tuple[int, int]]] = set()
+        motions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        while stack:
+            current = stack[-1]
+            neighbors = []
+            for dx, dy in motions:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if 0 <= neighbor[0] < columns and 0 <= neighbor[1] < rows and neighbor not in visited:
+                    neighbors.append(neighbor)
+            if not neighbors:
+                stack.pop()
+                continue
+            next_cell = rng.choice(neighbors)
+            carve_connection(current, next_cell)
+            tree_edges.add(frozenset((current, next_cell)))
+            visited.add(next_cell)
+            stack.append(next_cell)
+
+        # Add a few deterministic loops without turning the maze into an open room.
+        extra_edges = []
+        for row in range(rows):
+            for column in range(columns):
+                current = (column, row)
+                for neighbor in ((column + 1, row), (column, row + 1)):
+                    if neighbor[0] >= columns or neighbor[1] >= rows:
+                        continue
+                    edge = frozenset((current, neighbor))
+                    if edge not in tree_edges:
+                        extra_edges.append((current, neighbor))
+        rng.shuffle(extra_edges)
+        for first, second in extra_edges[:6]:
+            carve_connection(first, second)
+
+        entrance_cells = [(0, 1), (columns - 1, 2), (0, rows - 2), (columns - 1, rows - 3)]
+        for column, row in entrance_cells:
+            x, y = chamber_origin((column, row))
+            if column == 0:
+                grid[y : y + 3, : x + 3] = FREE
+            else:
+                grid[y : y + 3, x:] = FREE
+
+        rectangles: list[tuple[float, float, float, float]] = []
+        active_runs: dict[tuple[int, int], tuple[int, int]] = {}
+        for y in range(self.height):
+            row_runs: set[tuple[int, int]] = set()
+            x = 0
+            while x < self.width:
+                if grid[y, x] == FREE:
+                    x += 1
+                    continue
+                start_x = x
+                while x + 1 < self.width and grid[y, x + 1] == OBSTACLE:
+                    x += 1
+                row_runs.add((start_x, x - start_x + 1))
+                x += 1
+
+            for run, (start_y, height) in list(active_runs.items()):
+                if run in row_runs:
+                    active_runs[run] = (start_y, height + 1)
+                    row_runs.remove(run)
+                    continue
+                start_x, width = run
+                rectangles.append(
+                    (float(start_x) - 0.5, float(start_y) - 0.5, float(width), float(height))
+                )
+                del active_runs[run]
+
+            for run in row_runs:
+                active_runs[run] = (y, 1)
+
+        for (start_x, width), (start_y, height) in active_runs.items():
+            rectangles.append(
+                (float(start_x) - 0.5, float(start_y) - 0.5, float(width), float(height))
+            )
+        return [], rectangles
+
     def _rasterize(self, inflation_radius: float) -> np.ndarray:
         grid = np.zeros((self.height, self.width), dtype=np.int8)
         for y in range(self.height):
@@ -64,6 +195,8 @@ class GridWorld:
         return grid
 
     def _clear_launch_area(self, grid: np.ndarray) -> None:
+        if self.config.map_id == 2:
+            return
         grid[:, : self.config.known_strip_width] = FREE
 
     def point_collides_raw_obstacle(self, point: tuple[float, float], margin: float = 0.0) -> bool:
@@ -107,6 +240,22 @@ class KnownMap:
 
 
 def make_column_starts(config: RACERConfig) -> list[tuple[int, int]]:
+    if config.map_id == 2:
+        origin_x, origin_y, columns, rows, pitch = dense_maze_layout(config)
+        west_y1 = origin_y + pitch + 1
+        east_y1 = origin_y + 2 * pitch + 1
+        west_y2 = origin_y + (rows - 2) * pitch + 1
+        east_y2 = origin_y + (rows - 3) * pitch + 1
+        starts = [
+            (1, west_y1),
+            (config.width - 2, east_y1),
+            (1, west_y2),
+            (config.width - 2, east_y2),
+        ]
+        if config.num_uavs > 4:
+            raise ValueError("Map 2 is a four-UAV dense-maze scenario and supports at most 4 UAVs.")
+        return starts[: config.num_uavs]
+
     x = max(0, min(config.known_strip_width - 2, 1))
     margin = max(3, int(math.ceil(config.coverage_radius + config.safe_radius)))
     if config.num_uavs == 1:
@@ -208,7 +357,6 @@ def bresenham(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, i
 def planning_grid_from_known_map(
     known_map: KnownMap,
     config: RACERConfig,
-    dynamic_obstacles: set[tuple[int, int]] | None = None,
     block_unknown: bool | None = None,
 ) -> np.ndarray:
     grid = np.zeros_like(known_map.grid, dtype=np.int8)
@@ -233,13 +381,6 @@ def planning_grid_from_known_map(
     if block_unknown:
         grid[known_map.grid == UNKNOWN] = OBSTACLE
 
-    if dynamic_obstacles:
-        dyn_radius = int(math.ceil(config.dynamic_obstacle_inflation))
-        for x, y in dynamic_obstacles:
-            for yy in range(max(0, y - dyn_radius), min(grid.shape[0], y + dyn_radius + 1)):
-                for xx in range(max(0, x - dyn_radius), min(grid.shape[1], x + dyn_radius + 1)):
-                    if math.hypot(xx - x, yy - y) <= config.dynamic_obstacle_inflation:
-                        grid[yy, xx] = OBSTACLE
     return grid
 
 
@@ -247,10 +388,9 @@ def planning_grid_for_uav(
     known_map: KnownMap,
     config: RACERConfig,
     uav: UAV,
-    dynamic_obstacles: set[tuple[int, int]] | None = None,
     block_unknown: bool | None = None,
 ) -> np.ndarray:
-    grid = planning_grid_from_known_map(known_map, config, dynamic_obstacles, block_unknown)
+    grid = planning_grid_from_known_map(known_map, config, block_unknown)
     for x, y in getattr(uav, "local_blocked_cells", set()):
         if 0 <= x < known_map.world.width and 0 <= y < known_map.world.height:
             grid[y, x] = OBSTACLE

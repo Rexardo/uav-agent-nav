@@ -65,10 +65,9 @@ class RACERConfig:
     no_info_steps: int = 12
     no_progress_distance: float = 0.2
 
-    future_path_horizon: int = 5
-    conflict_margin: float = 0.25
-    reciprocal_replan_rounds: int = 2
-    dynamic_obstacle_inflation: float = 1.2
+    # Official RACER checks received swarm trajectories without fixed-ID priority.
+    swarm_collision_check_distance: float = 0.5
+    swarm_safe_distance: float = 1.0
 
     render_interval: int = 2
     render_pause: float = 0.001
@@ -86,6 +85,11 @@ class RACERConfig:
     bspline_obstacle_clearance: float = 0.7
     bspline_smooth_weight: float = 0.35
     bspline_obstacle_weight: float = 0.16
+    bspline_swarm_weight: float = 5.0
+
+    # map_id=1：原来的随机障碍物地图，seed 控制障碍物分布。
+    # map_id=2：固定 Dense Maze，四机从左右入口探索三格宽迷宫。
+    map_id: int = 1
 
     def meters_to_cells(self, value: float) -> float:
         return value / max(1e-9, self.map_resolution)
