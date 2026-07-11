@@ -1,4 +1,5 @@
 import math
+import argparse
 from collections import deque
 
 import matplotlib.pyplot as plt
@@ -567,7 +568,7 @@ def run_simulation(
     width=50,
     height=50,
     num_obstacles=50,
-    map_seed=42,
+    map_seed=None,
     inflation_radius=0.8,
     max_logical_steps=500,
     render_frames_per_step=5,
@@ -575,7 +576,6 @@ def run_simulation(
     inspection_regions=None,      
     center_region_size=30,        
     waypoint_spacing=None,        
-    coverage_finish_ratio=0.95,   
 ):
     test_circles, test_rectangles, density = generate_test_map(
         width=width,
@@ -795,6 +795,7 @@ def run_simulation(
         print(f"\n⚠️ 达到最大步数 ({max_logical_steps}) 仿真结束。部分无人机可能未完成任务。")
         current_coverage = inspection_map.coverage_ratio()
 
+    print(f"地图种子：{map_seed}")
     print(f"最终覆盖率：{current_coverage * 100:.2f}%")
     print(f"总计解决死锁次数：{total_deadlocks_resolved}")
     print("-" * 30)
@@ -862,18 +863,34 @@ def run_simulation(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--num_uavs", type=int, default=5, help="Number of UAVs")
+    parser.add_argument("--width", type=int, default=50, help="Map width")
+    parser.add_argument("--height", type=int, default=50, help="Map height")
+    parser.add_argument("--ob", "--num_obstacles", type=int, default=50, help="Number of obstacles")
+    parser.add_argument("--map_seed", type=int, default=None, help="Random seed for map")
+    parser.add_argument("--ir", "--inflation_radius", type=float, default=0.8, help="Safe radius for obstacles")
+    parser.add_argument("--steps", "--max_steps", type=int, default=500, help="Max logical steps")
+    parser.add_argument("--rf", "--render_frames", type=int, default=5, help="Render frame per second")
+    parser.add_argument("--cr", "--coverage_radius", type=float, default=3.0, help="Coverage radius")
+    parser.add_argument("--crs", "--center_region_size", type=float, default=30, help="Center region size")
+    parser.add_argument("--ins_region", "--inspection_region", type=list[tuple[int, int, int, int]], default=None, help="Inspection region")
+    parser.add_argument("--ws", "--waypoint_spacing", type=int, default=None, help="Waypoint spacing")
+
+    args = parser.parse_args()
+
     run_simulation(
-        num_uavs=3,              
-        width=50,
-        height=50,
-        num_obstacles=50,
-        map_seed=114514,              
-        inflation_radius=0.8,
-        max_logical_steps=1000,   
-        render_frames_per_step=5,
-        coverage_radius=3.0,      
-        center_region_size=30,    
-        inspection_regions=None,  
-        waypoint_spacing=None,    
-        coverage_finish_ratio=0.95,
+        num_uavs=args.num_uavs,              
+        width=args.width,
+        height=args.height,
+        num_obstacles=args.ob,
+        map_seed=args.map_seed,              
+        inflation_radius=args.ir,
+        max_logical_steps=args.steps,   
+        render_frames_per_step=args.rf,
+        coverage_radius=args.cr,      
+        center_region_size=args.crs,    
+        inspection_regions=args.ins_region,  
+        waypoint_spacing=args.ws,    
     )
