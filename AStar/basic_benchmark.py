@@ -1,4 +1,5 @@
 import math
+import argparse
 import random
 from collections import deque
 import numpy as np
@@ -543,5 +544,11 @@ def run_benchmark_and_plot(num_maps=5, max_uavs=8):
     plt.show()
 
 if __name__ == "__main__":
-    # 默认跑 5 张随机地图，你可以根据需要调整这里的参数进行测试
-    run_benchmark_and_plot(num_maps=100, max_uavs=8)
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--num_maps", type=int, default=100, help="The number of maps you want to use for testing")
+    parser.add_argument("--max_uavs", type=int, default=8, help="Max posible uavs")
+
+    arg = parser.parse_args()
+
+    run_benchmark_and_plot(num_maps=arg.num_maps, max_uavs=arg.max_uavs)
