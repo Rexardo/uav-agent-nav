@@ -11,17 +11,17 @@ from racer_types import FREE, OBSTACLE, UNKNOWN, RACERConfig, UAV
 
 
 def dense_maze_layout(config: RACERConfig) -> tuple[int, int, int, int, int]:
-    """Return origin, coarse dimensions, and pitch for the fixed dense maze."""
+    """Return the launch-area edge, maze bounds, and entrance height of map 2."""
     if config.width < 40 or config.height < 40:
         raise ValueError("Map 2 requires width and height of at least 40 cells.")
-    pitch = 5  # Three free cells followed by a two-cell wall.
-    columns = (config.width - 2) // pitch
-    rows = (config.height - 2) // pitch
-    maze_width = columns * 3 + (columns - 1) * 2
-    maze_height = rows * 3 + (rows - 1) * 2
-    origin_x = (config.width - maze_width) // 2
-    origin_y = (config.height - maze_height) // 2
-    return origin_x, origin_y, columns, rows, pitch
+    scale_x = (config.width - 1) / 52.0
+    scale_y = (config.height - 1) / 49.0
+    left = max(4, int(round(6 * scale_x)))
+    right = min(config.width - 2, int(round(50 * scale_x)))
+    bottom = max(2, int(round(4 * scale_y)))
+    top = min(config.height - 2, int(round(45 * scale_y)))
+    entrance_y = int(round(15 * scale_y))
+    return left, right, bottom, top, entrance_y
 
 
 class GridWorld:
@@ -41,8 +41,8 @@ class GridWorld:
         # 地图 1：原来的随机障碍物地图。
         if self.config.map_id == 1:
             return self._generate_random_obstacles()
-        # 地图 2：固定 Dense Maze。三格宽长通道、密集直角转弯、盲巷和
-        # 少量环路用于测试多机在狭窄迷宫中的轨迹冲突与死锁。
+        # 地图 2：参考 Dense Maze 图片雕刻的固定单入口迷宫。
+        # 通道仅一格宽，四架无人机从左侧空地经同一入口向右探索。
         if self.config.map_id == 2:
             return self._generate_dense_maze_obstacles()
         raise ValueError(f"Unsupported map_id={self.config.map_id}; expected 1 or 2.")
@@ -71,75 +71,74 @@ class GridWorld:
         return circles, rectangles
 
     def _generate_dense_maze_obstacles(self) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float, float]]]:
-        """Build a reproducible connected maze with four side entrances."""
-        origin_x, origin_y, columns, rows, pitch = dense_maze_layout(self.config)
+        """Carve a one-cell-wide corridor network matching the reference maze."""
         grid = np.ones((self.height, self.width), dtype=np.int8)
+        left, _, bottom, top, _ = dense_maze_layout(self.config)
+        scale_x = (self.width - 1) / 52.0
+        scale_y = (self.height - 1) / 49.0
 
-        def chamber_origin(cell: tuple[int, int]) -> tuple[int, int]:
-            column, row = cell
-            return origin_x + column * pitch, origin_y + row * pitch
+        def point(x: int, y: int) -> tuple[int, int]:
+            return int(round(x * scale_x)), int(round(y * scale_y))
 
-        def carve_chamber(cell: tuple[int, int]) -> None:
-            x, y = chamber_origin(cell)
-            grid[y : y + 3, x : x + 3] = FREE
-
-        def carve_connection(first: tuple[int, int], second: tuple[int, int]) -> None:
-            x1, y1 = chamber_origin(first)
-            x2, y2 = chamber_origin(second)
-            if x1 == x2:
-                y = min(y1, y2) + 3
-                grid[y : y + 2, x1 : x1 + 3] = FREE
+        def carve_segment(segment: tuple[int, int, int, int]) -> None:
+            x1, y1 = point(segment[0], segment[1])
+            x2, y2 = point(segment[2], segment[3])
+            if y1 == y2:
+                x1, x2 = sorted((x1, x2))
+                grid[y1, x1 : x2 + 1] = FREE
             else:
-                x = min(x1, x2) + 3
-                grid[y1 : y1 + 3, x : x + 2] = FREE
+                y1, y2 = sorted((y1, y2))
+                grid[y1 : y2 + 1, x1] = FREE
 
-        for row in range(rows):
-            for column in range(columns):
-                carve_chamber((column, row))
-
-        rng = random.Random(20240711)
-        visited = {(0, 0)}
-        stack = [(0, 0)]
-        tree_edges: set[frozenset[tuple[int, int]]] = set()
-        motions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        while stack:
-            current = stack[-1]
-            neighbors = []
-            for dx, dy in motions:
-                neighbor = (current[0] + dx, current[1] + dy)
-                if 0 <= neighbor[0] < columns and 0 <= neighbor[1] < rows and neighbor not in visited:
-                    neighbors.append(neighbor)
-            if not neighbors:
-                stack.pop()
-                continue
-            next_cell = rng.choice(neighbors)
-            carve_connection(current, next_cell)
-            tree_edges.add(frozenset((current, next_cell)))
-            visited.add(next_cell)
-            stack.append(next_cell)
-
-        # Add a few deterministic loops without turning the maze into an open room.
-        extra_edges = []
-        for row in range(rows):
-            for column in range(columns):
-                current = (column, row)
-                for neighbor in ((column + 1, row), (column, row + 1)):
-                    if neighbor[0] >= columns or neighbor[1] >= rows:
-                        continue
-                    edge = frozenset((current, neighbor))
-                    if edge not in tree_edges:
-                        extra_edges.append((current, neighbor))
-        rng.shuffle(extra_edges)
-        for first, second in extra_edges[:6]:
-            carve_connection(first, second)
-
-        entrance_cells = [(0, 1), (columns - 1, 2), (0, rows - 2), (columns - 1, rows - 3)]
-        for column, row in entrance_cells:
-            x, y = chamber_origin((column, row))
-            if column == 0:
-                grid[y : y + 3, : x + 3] = FREE
-            else:
-                grid[y : y + 3, x:] = FREE
+        # The left launch field is open; every route beyond x=left is one cell
+        # wide except at explicit T-junctions and crossings.
+        grid[bottom : top + 1, : left + 1] = FREE
+        corridor_segments = [
+            # Shared entrance and central horizontal trunk.
+            (6, 15, 31, 15),
+            # Upper-left folded route and its inner branch.
+            (10, 15, 10, 39),
+            (10, 39, 18, 39),
+            (18, 32, 18, 39),
+            (18, 32, 26, 32),
+            (26, 24, 26, 32),
+            (26, 24, 31, 24),
+            (31, 15, 31, 24),
+            (14, 39, 14, 35),
+            (14, 35, 23, 35),
+            # Top-center loop and the short top-right dead end.
+            (31, 24, 36, 24),
+            (36, 24, 36, 41),
+            (36, 41, 45, 41),
+            (45, 35, 45, 41),
+            (41, 35, 45, 35),
+            (41, 24, 41, 35),
+            (36, 24, 41, 24),
+            (45, 35, 50, 35),
+            # Long right return loop.
+            (41, 24, 49, 24),
+            (49, 8, 49, 24),
+            (40, 8, 49, 8),
+            (40, 8, 40, 19),
+            (34, 19, 40, 19),
+            (34, 15, 34, 19),
+            (31, 15, 34, 15),
+            (40, 19, 44, 19),
+            (44, 19, 44, 22),
+            (44, 22, 47, 22),
+            # Lower-left loops and dead ends.
+            (12, 8, 12, 15),
+            (12, 8, 20, 8),
+            (20, 8, 20, 12),
+            (20, 12, 26, 12),
+            (26, 12, 26, 15),
+            (16, 5, 16, 8),
+            (16, 5, 31, 5),
+            (31, 5, 31, 15),
+            (23, 5, 23, 10),
+        ]
+        for segment in corridor_segments:
+            carve_segment(segment)
 
         rectangles: list[tuple[float, float, float, float]] = []
         active_runs: dict[tuple[int, int], tuple[int, int]] = {}
@@ -162,18 +161,14 @@ class GridWorld:
                     row_runs.remove(run)
                     continue
                 start_x, width = run
-                rectangles.append(
-                    (float(start_x) - 0.5, float(start_y) - 0.5, float(width), float(height))
-                )
+                rectangles.append((start_x - 0.5, start_y - 0.5, float(width), float(height)))
                 del active_runs[run]
 
             for run in row_runs:
                 active_runs[run] = (y, 1)
 
         for (start_x, width), (start_y, height) in active_runs.items():
-            rectangles.append(
-                (float(start_x) - 0.5, float(start_y) - 0.5, float(width), float(height))
-            )
+            rectangles.append((start_x - 0.5, start_y - 0.5, float(width), float(height)))
         return [], rectangles
 
     def _rasterize(self, inflation_radius: float) -> np.ndarray:
@@ -241,16 +236,13 @@ class KnownMap:
 
 def make_column_starts(config: RACERConfig) -> list[tuple[int, int]]:
     if config.map_id == 2:
-        origin_x, origin_y, columns, rows, pitch = dense_maze_layout(config)
-        west_y1 = origin_y + pitch + 1
-        east_y1 = origin_y + 2 * pitch + 1
-        west_y2 = origin_y + (rows - 2) * pitch + 1
-        east_y2 = origin_y + (rows - 3) * pitch + 1
+        _, _, _, _, entrance_y = dense_maze_layout(config)
+        spacing = max(3, int(round(config.height / 12)))
         starts = [
-            (1, west_y1),
-            (config.width - 2, east_y1),
-            (1, west_y2),
-            (config.width - 2, east_y2),
+            (1, entrance_y - 2 * spacing),
+            (1, entrance_y - spacing),
+            (1, entrance_y + spacing),
+            (1, entrance_y + 2 * spacing),
         ]
         if config.num_uavs > 4:
             raise ValueError("Map 2 is a four-UAV dense-maze scenario and supports at most 4 UAVs.")

@@ -21,6 +21,7 @@ from racer_map import (
     GridWorld,
     KnownMap,
     communication_components,
+    dense_maze_layout,
     explorable_known_ratio,
     make_column_starts,
     merge_known_maps_for_component,
@@ -51,8 +52,13 @@ class RACERSimulator:
             for i, start in enumerate(make_column_starts(config))
         ]
         self.known_maps = [KnownMap(self.world) for _ in self.uavs]
+        initial_known_width = config.known_strip_width
+        if config.map_id == 2:
+            launch_area_right, _, _, _, _ = dense_maze_layout(config)
+            initial_known_width = max(initial_known_width, launch_area_right + 1)
+        self.initial_known_width = initial_known_width
         for known_map in self.known_maps:
-            known_map.grid[:, : config.known_strip_width] = self.world.raw_obstacle_map[:, : config.known_strip_width]
+            known_map.grid[:, : self.initial_known_width] = self.world.raw_obstacle_map[:, : self.initial_known_width]
         for uav, known_map in zip(self.uavs, self.known_maps):
             update_known_map_with_sensor(known_map, uav, config)
 
@@ -77,6 +83,8 @@ class RACERSimulator:
         }
         self.exploration_finished_step: int | None = None
         self.returned_home = False
+        self.termination_reason = "max_steps"
+        self.collision_events: list[dict[str, Any]] = []
 
     def run(self, show: bool = True) -> dict[str, Any]:
         if show and plt is None:
@@ -94,6 +102,8 @@ class RACERSimulator:
 
         for step_idx in range(self.config.max_steps):
             final_step = step_idx
+            if show and fig is not None:
+                fig.canvas.flush_events()
             self.merge_maps()
             final_ratio = self.known_ratio()
             if final_ratio > best_ratio + 1e-4:
@@ -107,6 +117,7 @@ class RACERSimulator:
                 self.return_home_tick()
                 if all(uav.pos == uav.start for uav in self.uavs):
                     self.returned_home = True
+                    self.termination_reason = "returned_home"
                     self.render(show, ax, step_idx, final_ratio, force=True)
                     break
 
@@ -124,11 +135,31 @@ class RACERSimulator:
                 if self.phase == "explore":
                     continue
                 continue
+            previous_positions = [uav.pos for uav in self.uavs]
             self.move_uavs_safely(movable)
+            collision_events = self.detect_physical_collisions(previous_positions)
+            if collision_events:
+                self.collision_events = collision_events
+                self.termination_reason = "collision"
+                self.phase = "collision"
+                for uav in self.uavs:
+                    uav.set_plan(uav.target, [])
+                for event in collision_events:
+                    window_message = "窗口保持打开。" if show else ""
+                    print(f"{self.format_collision_event(event)}{window_message}", flush=True)
+                self.render(
+                    show,
+                    ax,
+                    step_idx,
+                    final_ratio,
+                    force=True,
+                    previous_positions=previous_positions,
+                )
+                break
             for uav, known_map in zip(self.uavs, self.known_maps):
                 newly_known = update_known_map_with_sensor(known_map, uav, self.config)
                 self.update_progress_monitor(uav, newly_known)
-            self.render(show, ax, step_idx, final_ratio)
+            self.render(show, ax, step_idx, final_ratio, previous_positions=previous_positions)
 
         if show:
             plt.ioff()
@@ -140,7 +171,7 @@ class RACERSimulator:
             merge_known_maps_for_component(component, self.known_maps)
 
     def known_ratio(self) -> float:
-        return explorable_known_ratio(self.known_maps, self.world.raw_obstacle_map, self.config.known_strip_width)
+        return explorable_known_ratio(self.known_maps, self.world.raw_obstacle_map, self.initial_known_width)
 
     def update_phase(self, known_ratio: float, step_idx: int, last_improvement: int) -> None:
         if self.phase != "explore":
@@ -332,6 +363,98 @@ class RACERSimulator:
                     known_map.grid[y, x] = self.world.raw_obstacle_map[y, x]
             self.stop_unsafe_uav(uav)
 
+    def detect_physical_collisions(
+        self,
+        previous_positions: list[tuple[int, int]],
+    ) -> list[dict[str, Any]]:
+        """Detect hard contacts during the most recently executed motion step."""
+        events: list[dict[str, Any]] = []
+        center_threshold = self.config.meters_to_cells(self.config.swarm_collision_check_distance)
+        body_radius = center_threshold / 2.0
+
+        for uav, start in zip(self.uavs, previous_positions):
+            if self.world.segment_collides_raw_obstacle(
+                start,
+                uav.pos,
+                margin=body_radius,
+                step=self.config.shortcut_safety_step,
+            ):
+                events.append(
+                    {
+                        "type": "uav_obstacle",
+                        "uav_ids": [uav.id],
+                        "from": start,
+                        "to": uav.pos,
+                    }
+                )
+
+        for first_index in range(len(self.uavs)):
+            for second_index in range(first_index + 1, len(self.uavs)):
+                first_start = previous_positions[first_index]
+                second_start = previous_positions[second_index]
+                first_end = self.uavs[first_index].pos
+                second_end = self.uavs[second_index].pos
+                distance, collision_position = self.synchronized_motion_distance(
+                    first_start,
+                    first_end,
+                    second_start,
+                    second_end,
+                )
+                if distance < center_threshold:
+                    events.append(
+                        {
+                            "type": "uav_uav",
+                            "uav_ids": [self.uavs[first_index].id, self.uavs[second_index].id],
+                            "position": collision_position,
+                            "distance": distance,
+                        }
+                    )
+        return events
+
+    @staticmethod
+    def synchronized_motion_distance(
+        first_start: tuple[int, int],
+        first_end: tuple[int, int],
+        second_start: tuple[int, int],
+        second_end: tuple[int, int],
+    ) -> tuple[float, tuple[float, float]]:
+        """Return minimum distance of two linearly moving points over one time step."""
+        first_start_array = np.asarray(first_start, dtype=float)
+        first_end_array = np.asarray(first_end, dtype=float)
+        second_start_array = np.asarray(second_start, dtype=float)
+        second_end_array = np.asarray(second_end, dtype=float)
+        relative_start = first_start_array - second_start_array
+        relative_velocity = (
+            first_end_array - first_start_array - second_end_array + second_start_array
+        )
+        speed_squared = float(np.dot(relative_velocity, relative_velocity))
+        if speed_squared <= 1e-12:
+            closest_time = 0.0
+        else:
+            closest_time = float(
+                np.clip(-np.dot(relative_start, relative_velocity) / speed_squared, 0.0, 1.0)
+            )
+        first_position = first_start_array + (first_end_array - first_start_array) * closest_time
+        second_position = second_start_array + (second_end_array - second_start_array) * closest_time
+        distance = float(np.linalg.norm(first_position - second_position))
+        midpoint = (first_position + second_position) / 2.0
+        return distance, (float(midpoint[0]), float(midpoint[1]))
+
+    @staticmethod
+    def format_collision_event(event: dict[str, Any]) -> str:
+        if event["type"] == "uav_uav":
+            first_id, second_id = event["uav_ids"]
+            x, y = event["position"]
+            return (
+                f"COLLISION: U{first_id} 与 U{second_id} 发生碰撞，"
+                f"位置约为 ({x:.2f}, {y:.2f})。仿真已停止。"
+            )
+        uav_id = event["uav_ids"][0]
+        return (
+            f"COLLISION: U{uav_id} 与障碍物发生碰撞，"
+            f"运动段为 {event['from']} -> {event['to']}。仿真已停止。"
+        )
+
     def stop_unsafe_uav(self, uav: UAV) -> None:
         # Official RACER hovers after a failed replan and retries the same target.
         uav.set_plan(uav.target, [])
@@ -383,13 +506,54 @@ class RACERSimulator:
                 uav.set_plan(uav.target, [])
                 self.stats["swarm_replan_failure_count"] += 1
 
-    def render(self, show: bool, ax, step_idx: int, known_ratio: float, force: bool = False) -> None:
+    def render(
+        self,
+        show: bool,
+        ax,
+        step_idx: int,
+        known_ratio: float,
+        force: bool = False,
+        previous_positions: list[tuple[int, int]] | None = None,
+    ) -> None:
         if not show or ax is None or plt is None:
             return
         if not force and step_idx % max(1, self.config.render_interval) != 0:
             return
-        render_state(ax, self.world, self.known_maps, self.uavs, self.hgrid, step_idx, known_ratio, self.phase, self.config)
-        plt.pause(self.config.render_pause)
+        frames = max(1, self.config.render_interpolation_frames)
+        current_positions = [uav.pos for uav in self.uavs]
+        can_interpolate = previous_positions is not None and len(previous_positions) == len(current_positions)
+        initial_positions = previous_positions if can_interpolate else current_positions
+        moving_artists = render_state(
+            ax,
+            self.world,
+            self.known_maps,
+            self.uavs,
+            self.hgrid,
+            step_idx,
+            known_ratio,
+            self.phase,
+            self.config,
+            display_positions=initial_positions,
+        )
+        pause = max(0.001, self.config.render_pause)
+        if not can_interpolate or frames == 1:
+            plt.pause(pause)
+            return
+
+        for frame_index in range(1, frames + 1):
+            alpha = frame_index / frames
+            display_positions = [
+                (
+                    start[0] + (end[0] - start[0]) * alpha,
+                    start[1] + (end[1] - start[1]) * alpha,
+                )
+                for start, end in zip(previous_positions, current_positions)
+            ]
+            for (marker, label), position in zip(moving_artists, display_positions):
+                marker.set_offsets(np.asarray([position], dtype=float))
+                label.set_position((position[0] + 0.25, position[1] + 0.25))
+            ax.figure.canvas.draw_idle()
+            plt.pause(pause)
 
     def result(self, final_step: int, final_ratio: float) -> dict[str, Any]:
         result = {
@@ -400,6 +564,8 @@ class RACERSimulator:
             "path_length_total": sum(len(uav.history) for uav in self.uavs),
             "exploration_finished_step": self.exploration_finished_step,
             "returned_home": self.returned_home,
+            "termination_reason": self.termination_reason,
+            "collision_events": list(self.collision_events),
             "final_positions": [uav.pos for uav in self.uavs],
             "home_flags": [uav.pos == uav.start for uav in self.uavs],
         }
@@ -407,7 +573,18 @@ class RACERSimulator:
         return result
 
 
-def render_state(ax, world: GridWorld, known_maps: list[KnownMap], uavs: list[UAV], hgrid: HGrid, step_idx: int, known_ratio: float, phase: str, config: RACERConfig) -> None:
+def render_state(
+    ax,
+    world: GridWorld,
+    known_maps: list[KnownMap],
+    uavs: list[UAV],
+    hgrid: HGrid,
+    step_idx: int,
+    known_ratio: float,
+    phase: str,
+    config: RACERConfig,
+    display_positions: list[tuple[float, float]] | None = None,
+) -> list[tuple[Any, Any]]:
     ax.clear()
     cmap = plt.get_cmap("tab20")
     merged_grid = union_known_grid(known_maps)
@@ -427,8 +604,10 @@ def render_state(ax, world: GridWorld, known_maps: list[KnownMap], uavs: list[UA
         rect = patches.Rectangle((block.x_min, block.y_min), block.width(), block.height(), fill=False, edgecolor=color, linewidth=max(0.7, 1.5 - 0.25 * block.level), alpha=0.65)
         ax.add_patch(rect)
 
-    for uav in uavs:
+    moving_artists = []
+    for index, uav in enumerate(uavs):
         color = cmap((uav.id - 1) % 20)
+        display_pos = uav.pos if display_positions is None else display_positions[index]
         history = uav.history if config.render_history_tail <= 0 else uav.history[-config.render_history_tail :]
         hx = [p[0] for p in history]
         hy = [p[1] for p in history]
@@ -437,13 +616,15 @@ def render_state(ax, world: GridWorld, known_maps: list[KnownMap], uavs: list[UA
             ax.plot([p[0] for p in uav.cp_path], [p[1] for p in uav.cp_path], color=color, linewidth=0.7, alpha=0.35)
         if uav.path:
             ax.plot([uav.pos[0]] + [p[0] for p in uav.path], [uav.pos[1]] + [p[1] for p in uav.path], color=color, linestyle="--", linewidth=1)
-        ax.scatter([uav.pos[0]], [uav.pos[1]], s=80, color=[color], edgecolors="black", zorder=5)
-        ax.text(uav.pos[0] + 0.25, uav.pos[1] + 0.25, f"U{uav.id}", color="black")
+        marker = ax.scatter([display_pos[0]], [display_pos[1]], s=80, color=[color], edgecolors="black", zorder=5)
+        label = ax.text(display_pos[0] + 0.25, display_pos[1] + 0.25, f"U{uav.id}", color="black")
+        moving_artists.append((marker, label))
 
     ax.set_title(f"RACER modular | step={step_idx} | known={known_ratio:.1%} | {phase}")
     ax.set_xlim(-0.5, world.width - 0.5)
     ax.set_ylim(-0.5, world.height - 0.5)
     ax.set_aspect("equal")
+    return moving_artists
 
 
 def run_simulation(config: RACERConfig, show: bool = True) -> dict[str, Any]:

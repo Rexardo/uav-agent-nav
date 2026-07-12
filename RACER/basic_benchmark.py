@@ -362,7 +362,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         choices=(1, 2),
         default=RACERConfig.map_id,
-        help="1: original random map; 2: fixed four-UAV dense maze.",
+        help="1: original random map; 2: fixed dense maze with four left-side starts.",
     )
     parser.add_argument("--num-maps", type=int, default=5, help="Number of seeded random maps.")
     parser.add_argument("--max-uavs", type=int, default=8, help="Test UAV counts from 1 through this value.")
