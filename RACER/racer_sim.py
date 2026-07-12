@@ -41,7 +41,7 @@ from racer_path_searching import (
     path_is_free,
     shortcut_path,
 )
-from racer_trajectory import densify_grid_path, smooth_trajectory
+from racer_trajectory import densify_grid_path, smooth_trajectory, chaikin_refine
 from racer_types import FREE, OBSTACLE, RACERConfig, UAV
 
 class RACERSimulator:
@@ -109,7 +109,8 @@ class RACERSimulator:
                 self.return_home_tick()
                 if all(uav.pos == uav.start for uav in self.uavs):
                     self.returned_home = True
-                    self.render(show, ax, step_idx, final_ratio, force=True)
+                    # 这里注释掉旧的渲染，不需要在这时强制渲染最后一帧
+                    # self.render(show, ax, step_idx, final_ratio, force=True)
                     break
 
             self.resolve_conflicts()
@@ -130,11 +131,15 @@ class RACERSimulator:
             for uav, known_map in zip(self.uavs, self.known_maps):
                 newly_known = update_known_map_with_sensor(known_map, uav, self.config)
                 self.update_progress_monitor(uav, newly_known)
+                
             self.render(show, ax, step_idx, final_ratio)
 
+        # Smooth plot
         if show:
+            self.render_final_paths(show, ax)
             plt.ioff()
             plt.show()
+            
         return self.result(final_step, final_ratio)
 
     def merge_maps(self) -> None:
@@ -416,6 +421,47 @@ class RACERSimulator:
         }
         result.update(self.stats)
         return result
+    
+    def render_final_paths(self, show: bool, ax) -> None:
+        if not show or ax is None or plt is None:
+            return
+            
+        ax.clear()
+        cmap = plt.get_cmap("tab20")
+        merged_grid = union_known_grid(self.known_maps)
+        display = np.zeros((self.world.height, self.world.width, 3), dtype=float)
+        display[:, :] = [0.90, 0.90, 0.90]
+        display[merged_grid == FREE] = [1.0, 1.0, 1.0]
+        display[merged_grid == OBSTACLE] = [0.35, 0.35, 0.35]
+        ax.imshow(display, origin="lower", extent=[-0.5, self.world.width - 0.5, -0.5, self.world.height - 0.5])
+
+        obstacle_patches = [patches.Rectangle((rx, ry), rw, rh) for rx, ry, rw, rh in self.world.rectangles]
+        obstacle_patches.extend(patches.Circle((cx, cy), radius) for cx, cy, radius in self.world.circles)
+        if obstacle_patches:
+            ax.add_collection(PatchCollection(obstacle_patches, facecolor="gray", edgecolor="black", linewidth=1, alpha=0.45))
+
+        for uav in self.uavs:
+            color = cmap((uav.id - 1) % 20)
+            
+            # Chaikin smooth
+            pts = [(float(p[0]), float(p[1])) for p in uav.history]
+            for _ in range(4):  
+                pts = chaikin_refine(pts)
+                
+            hx = [p[0] for p in pts]
+            hy = [p[1] for p in pts]
+            
+            ax.plot(hx, hy, color=color, linewidth=2.0)
+            
+            ax.scatter([uav.start[0]], [uav.start[1]], s=100, marker='s', color=[color], edgecolors="black", zorder=5)
+            ax.scatter([uav.pos[0]], [uav.pos[1]], s=150, marker='*', color=[color], edgecolors="black", zorder=5)
+            ax.text(uav.pos[0] + 0.25, uav.pos[1] + 0.25, f"U{uav.id}", color="black")
+
+        ax.set_title("RACER modular | Final Smoothed Trajectories")
+        ax.set_xlim(-0.5, self.world.width - 0.5)
+        ax.set_ylim(-0.5, self.world.height - 0.5)
+        ax.set_aspect("equal")
+        plt.draw()
 
 
 def render_state(ax, world: GridWorld, known_maps: list[KnownMap], uavs: list[UAV], hgrid: HGrid, step_idx: int, known_ratio: float, phase: str, config: RACERConfig) -> None:
@@ -440,14 +486,9 @@ def render_state(ax, world: GridWorld, known_maps: list[KnownMap], uavs: list[UA
 
     for uav in uavs:
         color = cmap((uav.id - 1) % 20)
-        history = uav.history if config.render_history_tail <= 0 else uav.history[-config.render_history_tail :]
-        hx = [p[0] for p in history]
-        hy = [p[1] for p in history]
-        ax.plot(hx, hy, color=color, linewidth=1.5)
-        if uav.cp_path:
-            ax.plot([p[0] for p in uav.cp_path], [p[1] for p in uav.cp_path], color=color, linewidth=0.7, alpha=0.35)
-        if uav.path:
-            ax.plot([uav.pos[0]] + [p[0] for p in uav.path], [uav.pos[1]] + [p[1] for p in uav.path], color=color, linestyle="--", linewidth=1)
+        
+        # --- Remove real-time trajectory display ---
+        
         ax.scatter([uav.pos[0]], [uav.pos[1]], s=80, color=[color], edgecolors="black", zorder=5)
         ax.text(uav.pos[0] + 0.25, uav.pos[1] + 0.25, f"U{uav.id}", color="black")
 
