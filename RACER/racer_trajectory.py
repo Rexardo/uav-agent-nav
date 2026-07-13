@@ -15,6 +15,7 @@ def smooth_trajectory(
     grid: np.ndarray,
     config: RACERConfig,
     soft_obstacle_grid: np.ndarray | None = None,
+    swarm_paths: list[list[tuple[int, int]]] | None = None,
 ) -> list[tuple[int, int]]:
     if not config.use_bspline_smoothing or len(path) <= 2:
         return densify_grid_path(path)
@@ -23,7 +24,12 @@ def smooth_trajectory(
     if len(controls) <= 2:
         return path
 
-    curve = optimize_control_points(controls, soft_obstacle_grid if soft_obstacle_grid is not None else grid, config)
+    curve = optimize_control_points(
+        controls,
+        soft_obstacle_grid if soft_obstacle_grid is not None else grid,
+        config,
+        swarm_paths,
+    )
     for _ in range(max(1, config.bspline_smooth_iterations)):
         curve = chaikin_refine(curve)
 
@@ -58,6 +64,7 @@ def optimize_control_points(
     controls: list[tuple[float, float]],
     grid: np.ndarray,
     config: RACERConfig,
+    swarm_paths: list[list[tuple[int, int]]] | None = None,
 ) -> list[tuple[float, float]]:
     """Nudge the guide control polygon with RACER-style smoothness and distance costs."""
     if len(controls) <= 2:
@@ -69,8 +76,13 @@ def optimize_control_points(
     smooth_weight = max(0.0, config.bspline_smooth_weight)
     obstacle_weight = max(0.0, config.bspline_obstacle_weight)
     clearance = max(0.0, config.bspline_obstacle_clearance_cells())
+    swarm_weight = max(0.0, config.bspline_swarm_weight)
+    swarm_clearance = max(0.0, config.meters_to_cells(config.swarm_safe_distance))
+    use_swarm_cost = bool(swarm_paths) and swarm_weight > 0.0 and swarm_clearance > 0.0
 
-    if obstacle_yx.size == 0 or (smooth_weight <= 0.0 and obstacle_weight <= 0.0):
+    if obstacle_yx.size == 0 and not use_swarm_cost:
+        return [(float(x), float(y)) for x, y in points]
+    if smooth_weight <= 0.0 and obstacle_weight <= 0.0 and not use_swarm_cost:
         return [(float(x), float(y)) for x, y in points]
 
     obstacle_xy = obstacle_yx[:, ::-1].astype(float)
@@ -80,15 +92,39 @@ def optimize_control_points(
             smooth_delta = 0.5 * (previous[idx - 1] + previous[idx + 1]) - previous[idx]
             delta = smooth_weight * smooth_delta
 
-            if obstacle_weight > 0.0 and clearance > 0.0:
+            if obstacle_xy.size > 0 and obstacle_weight > 0.0 and clearance > 0.0:
                 repulsion = nearest_obstacle_repulsion(previous[idx], previous[idx - 1], previous[idx + 1], obstacle_xy, clearance)
                 delta += obstacle_weight * repulsion
+
+            if use_swarm_cost:
+                repulsion = swarm_trajectory_repulsion(previous[idx], idx, swarm_paths or [], swarm_clearance)
+                delta += 0.1 * swarm_weight * repulsion
 
             points[idx] = previous[idx] + delta
             points[idx, 0] = float(np.clip(points[idx, 0], 0.0, width - 1.0))
             points[idx, 1] = float(np.clip(points[idx, 1], 0.0, height - 1.0))
 
     return [(float(x), float(y)) for x, y in points]
+
+
+def swarm_trajectory_repulsion(
+    point: np.ndarray,
+    step_idx: int,
+    swarm_paths: list[list[tuple[int, int]]],
+    clearance: float,
+) -> np.ndarray:
+    """Gradient direction of RACER's soft separation cost at one time step."""
+    repulsion = np.zeros(2, dtype=float)
+    for path in swarm_paths:
+        if not path:
+            continue
+        other = np.array(path[min(step_idx, len(path) - 1)], dtype=float)
+        diff = point - other
+        distance = float(np.linalg.norm(diff))
+        if distance <= 1e-9 or distance >= clearance:
+            continue
+        repulsion += (clearance - distance) * diff / distance
+    return repulsion
 
 
 def nearest_obstacle_repulsion(

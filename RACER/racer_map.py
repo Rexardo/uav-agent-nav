@@ -9,8 +9,23 @@ import numpy as np
 
 from racer_types import FREE, OBSTACLE, UNKNOWN, RACERConfig, UAV
 
+
+def dense_maze_layout(config: RACERConfig) -> tuple[int, int, int, int, int]:
+    """Return the launch-area edge, maze bounds, and entrance height of map 2."""
+    if config.width < 40 or config.height < 40:
+        raise ValueError("Map 2 requires width and height of at least 40 cells.")
+    scale_x = (config.width - 1) / 52.0
+    scale_y = (config.height - 1) / 49.0
+    left = max(4, int(round(6 * scale_x)))
+    right = min(config.width - 2, int(round(50 * scale_x)))
+    bottom = max(2, int(round(4 * scale_y)))
+    top = min(config.height - 2, int(round(45 * scale_y)))
+    entrance_y = int(round(15 * scale_y))
+    return left, right, bottom, top, entrance_y
+
+
 class GridWorld:
-    """Random obstacle map using the same circle/rectangle style as hgrid.py."""
+    """Selectable obstacle map using circle/rectangle geometry."""
 
     def __init__(self, config: RACERConfig):
         self.config = config
@@ -23,6 +38,16 @@ class GridWorld:
         self._clear_launch_area(self.true_map)
 
     def _generate_obstacles(self) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float, float]]]:
+        # 地图 1：原来的随机障碍物地图。
+        if self.config.map_id == 1:
+            return self._generate_random_obstacles()
+        # 地图 2：参考 Dense Maze 图片雕刻的固定单入口迷宫。
+        # 通道仅一格宽，四架无人机从左侧空地经同一入口向右探索。
+        if self.config.map_id == 2:
+            return self._generate_dense_maze_obstacles()
+        raise ValueError(f"Unsupported map_id={self.config.map_id}; expected 1 or 2.")
+
+    def _generate_random_obstacles(self) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float, float]]]:
         rng = random.Random(self.config.random_seed)
         circles: list[tuple[float, float, float]] = []
         rectangles: list[tuple[float, float, float, float]] = []
@@ -45,6 +70,107 @@ class GridWorld:
 
         return circles, rectangles
 
+    def _generate_dense_maze_obstacles(self) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float, float]]]:
+        """Carve a one-cell-wide corridor network matching the reference maze."""
+        grid = np.ones((self.height, self.width), dtype=np.int8)
+        left, _, bottom, top, _ = dense_maze_layout(self.config)
+        scale_x = (self.width - 1) / 52.0
+        scale_y = (self.height - 1) / 49.0
+
+        def point(x: int, y: int) -> tuple[int, int]:
+            return int(round(x * scale_x)), int(round(y * scale_y))
+
+        def carve_segment(segment: tuple[int, int, int, int]) -> None:
+            x1, y1 = point(segment[0], segment[1])
+            x2, y2 = point(segment[2], segment[3])
+            if y1 == y2:
+                x1, x2 = sorted((x1, x2))
+                grid[y1, x1 : x2 + 1] = FREE
+            else:
+                y1, y2 = sorted((y1, y2))
+                grid[y1 : y2 + 1, x1] = FREE
+
+        # The left launch field is open; every route beyond x=left is one cell
+        # wide except at explicit T-junctions and crossings.
+        grid[bottom : top + 1, : left + 1] = FREE
+        corridor_segments = [
+            # Shared entrance and central horizontal trunk.
+            (6, 15, 31, 15),
+            # Upper-left folded route and its inner branch.
+            (10, 15, 10, 39),
+            (10, 39, 18, 39),
+            (18, 32, 18, 39),
+            (18, 32, 26, 32),
+            (26, 24, 26, 32),
+            (26, 24, 31, 24),
+            (31, 15, 31, 24),
+            (14, 39, 14, 35),
+            (14, 35, 23, 35),
+            # Top-center loop and the short top-right dead end.
+            (31, 24, 36, 24),
+            (36, 24, 36, 41),
+            (36, 41, 45, 41),
+            (45, 35, 45, 41),
+            (41, 35, 45, 35),
+            (41, 24, 41, 35),
+            (36, 24, 41, 24),
+            (45, 35, 50, 35),
+            # Long right return loop.
+            (41, 24, 49, 24),
+            (49, 8, 49, 24),
+            (40, 8, 49, 8),
+            (40, 8, 40, 19),
+            (34, 19, 40, 19),
+            (34, 15, 34, 19),
+            (31, 15, 34, 15),
+            (40, 19, 44, 19),
+            (44, 19, 44, 22),
+            (44, 22, 47, 22),
+            # Lower-left loops and dead ends.
+            (12, 8, 12, 15),
+            (12, 8, 20, 8),
+            (20, 8, 20, 12),
+            (20, 12, 26, 12),
+            (26, 12, 26, 15),
+            (16, 5, 16, 8),
+            (16, 5, 31, 5),
+            (31, 5, 31, 15),
+            (23, 5, 23, 10),
+        ]
+        for segment in corridor_segments:
+            carve_segment(segment)
+
+        rectangles: list[tuple[float, float, float, float]] = []
+        active_runs: dict[tuple[int, int], tuple[int, int]] = {}
+        for y in range(self.height):
+            row_runs: set[tuple[int, int]] = set()
+            x = 0
+            while x < self.width:
+                if grid[y, x] == FREE:
+                    x += 1
+                    continue
+                start_x = x
+                while x + 1 < self.width and grid[y, x + 1] == OBSTACLE:
+                    x += 1
+                row_runs.add((start_x, x - start_x + 1))
+                x += 1
+
+            for run, (start_y, height) in list(active_runs.items()):
+                if run in row_runs:
+                    active_runs[run] = (start_y, height + 1)
+                    row_runs.remove(run)
+                    continue
+                start_x, width = run
+                rectangles.append((start_x - 0.5, start_y - 0.5, float(width), float(height)))
+                del active_runs[run]
+
+            for run in row_runs:
+                active_runs[run] = (y, 1)
+
+        for (start_x, width), (start_y, height) in active_runs.items():
+            rectangles.append((start_x - 0.5, start_y - 0.5, float(width), float(height)))
+        return [], rectangles
+
     def _rasterize(self, inflation_radius: float) -> np.ndarray:
         grid = np.zeros((self.height, self.width), dtype=np.int8)
         for y in range(self.height):
@@ -64,6 +190,8 @@ class GridWorld:
         return grid
 
     def _clear_launch_area(self, grid: np.ndarray) -> None:
+        if self.config.map_id == 2:
+            return
         grid[:, : self.config.known_strip_width] = FREE
 
     def point_collides_raw_obstacle(self, point: tuple[float, float], margin: float = 0.0) -> bool:
@@ -107,6 +235,19 @@ class KnownMap:
 
 
 def make_column_starts(config: RACERConfig) -> list[tuple[int, int]]:
+    if config.map_id == 2:
+        _, _, _, _, entrance_y = dense_maze_layout(config)
+        spacing = max(3, int(round(config.height / 12)))
+        starts = [
+            (1, entrance_y - 2 * spacing),
+            (1, entrance_y - spacing),
+            (1, entrance_y + spacing),
+            (1, entrance_y + 2 * spacing),
+        ]
+        if config.num_uavs > 4:
+            raise ValueError("Map 2 is a four-UAV dense-maze scenario and supports at most 4 UAVs.")
+        return starts[: config.num_uavs]
+
     x = max(0, min(config.known_strip_width - 2, 1))
     margin = max(3, int(math.ceil(config.coverage_radius + config.safe_radius)))
     if config.num_uavs == 1:
@@ -208,7 +349,6 @@ def bresenham(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, i
 def planning_grid_from_known_map(
     known_map: KnownMap,
     config: RACERConfig,
-    dynamic_obstacles: set[tuple[int, int]] | None = None,
     block_unknown: bool | None = None,
 ) -> np.ndarray:
     grid = np.zeros_like(known_map.grid, dtype=np.int8)
@@ -233,13 +373,6 @@ def planning_grid_from_known_map(
     if block_unknown:
         grid[known_map.grid == UNKNOWN] = OBSTACLE
 
-    if dynamic_obstacles:
-        dyn_radius = int(math.ceil(config.dynamic_obstacle_inflation))
-        for x, y in dynamic_obstacles:
-            for yy in range(max(0, y - dyn_radius), min(grid.shape[0], y + dyn_radius + 1)):
-                for xx in range(max(0, x - dyn_radius), min(grid.shape[1], x + dyn_radius + 1)):
-                    if math.hypot(xx - x, yy - y) <= config.dynamic_obstacle_inflation:
-                        grid[yy, xx] = OBSTACLE
     return grid
 
 
@@ -247,10 +380,9 @@ def planning_grid_for_uav(
     known_map: KnownMap,
     config: RACERConfig,
     uav: UAV,
-    dynamic_obstacles: set[tuple[int, int]] | None = None,
     block_unknown: bool | None = None,
 ) -> np.ndarray:
-    grid = planning_grid_from_known_map(known_map, config, dynamic_obstacles, block_unknown)
+    grid = planning_grid_from_known_map(known_map, config, block_unknown)
     for x, y in getattr(uav, "local_blocked_cells", set()):
         if 0 <= x < known_map.world.width and 0 <= y < known_map.world.height:
             grid[y, x] = OBSTACLE

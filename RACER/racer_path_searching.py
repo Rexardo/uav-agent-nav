@@ -8,7 +8,7 @@ import math
 import numpy as np
 
 from racer_map import bresenham, eight_neighbors, four_neighbors
-from racer_types import OBSTACLE, RACERConfig, UAV
+from racer_types import OBSTACLE, RACERConfig
 
 def astar(
     start: tuple[int, int],
@@ -221,7 +221,3 @@ def expand_path(path: list[tuple[int, int]]) -> list[tuple[int, int]]:
         expanded.extend(segment[1:])
     return expanded
 
-def future_position(uav: UAV, step_idx: int) -> tuple[int, int]:
-    if step_idx < len(uav.path):
-        return uav.path[step_idx]
-    return uav.path[-1] if uav.path else uav.pos

@@ -152,6 +152,7 @@ def trajectory_min_obstacle_distance(simulator: RACERSimulator) -> float:
 def run_simulation(
     num_uavs: int = RACERConfig.num_uavs,
     map_seed: int = RACERConfig.random_seed,
+    map_id: int = RACERConfig.map_id,
     max_steps: int = RACERConfig.max_steps,
     obstacle_count: int = RACERConfig.obstacle_count,
     width: int = RACERConfig.width,
@@ -163,6 +164,7 @@ def run_simulation(
     config = RACERConfig(
         num_uavs=max(1, int(num_uavs)),
         random_seed=int(map_seed),
+        map_id=int(map_id),
         max_steps=max(1, int(max_steps)),
         obstacle_count=max(0, int(obstacle_count)),
         width=max(8, int(width)),
@@ -290,6 +292,7 @@ def run_benchmark_and_plot(
     num_maps: int = 5,
     max_uavs: int = 8,
     benchmark_seed: int = 42,
+    map_id: int = RACERConfig.map_id,
     max_steps: int = RACERConfig.max_steps,
     obstacle_count: int = RACERConfig.obstacle_count,
     width: int = RACERConfig.width,
@@ -307,8 +310,13 @@ def run_benchmark_and_plot(
 
     print("\n==============================================")
     print("开始 RACER 批量基准测试 (Benchmark)")
-    print(f"共 {num_maps} 张随机地图 | 每张地图运行 1 到 {max_uavs} 架无人机")
-    print(f"地图种子: {map_seeds}")
+    map_name = "原始随机障碍地图" if map_id == 1 else "固定四机 Dense Maze 死锁压力地图"
+    print(f"地图 {map_id}: {map_name}")
+    print(f"共 {num_maps} 次地图测试 | 每次运行 1 到 {max_uavs} 架无人机")
+    if map_id == 1:
+        print(f"地图种子: {map_seeds}")
+    else:
+        print("地图 2 为固定结构，benchmark seed 不改变地图结构。")
     print("==============================================\n")
 
     metric_names = (
@@ -331,6 +339,7 @@ def run_benchmark_and_plot(
             result = run_simulation(
                 num_uavs=num_uavs,
                 map_seed=current_seed,
+                map_id=map_id,
                 max_steps=max_steps,
                 obstacle_count=obstacle_count,
                 width=width,
@@ -348,6 +357,13 @@ def run_benchmark_and_plot(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the RACER multi-UAV benchmark.")
+    parser.add_argument(
+        "--map-id",
+        type=int,
+        choices=(1, 2),
+        default=RACERConfig.map_id,
+        help="1: original random map; 2: fixed dense maze with four left-side starts.",
+    )
     parser.add_argument("--num-maps", type=int, default=5, help="Number of seeded random maps.")
     parser.add_argument("--max-uavs", type=int, default=8, help="Test UAV counts from 1 through this value.")
     parser.add_argument("--benchmark-seed", type=int, default=42, help="Seed used to generate the map-seed list.")
@@ -368,6 +384,7 @@ def main() -> None:
         num_maps=args.num_maps,
         max_uavs=args.max_uavs,
         benchmark_seed=args.benchmark_seed,
+        map_id=args.map_id,
         max_steps=args.max_steps,
         obstacle_count=args.obstacle_count,
         width=args.width,
