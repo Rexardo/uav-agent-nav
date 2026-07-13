@@ -62,7 +62,10 @@ def compute_reachable_mask(static_map, starts):
                 reachable[sy, sx] = True
                 queue.append((sx, sy))
 
-    motions = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+    # ==========================================
+    # 核心修改点：把 8 连通改为 4 连通
+    # ==========================================
+    motions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 
     while queue:
         x, y = queue.popleft()

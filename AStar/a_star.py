@@ -44,7 +44,6 @@ def astar(start_pos, goal_pos, grid_map):
 
     motions = [
         (0, 1, 1.0), (0, -1, 1.0), (1, 0, 1.0), (-1, 0, 1.0),
-        (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414) 
     ]
 
     map_width = len(grid_map[0])

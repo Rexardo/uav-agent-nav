@@ -3,25 +3,23 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Import baseline
+# 请确保这些现有的模块在同一目录下
 from basic_benchmark import (
     StaticMap, make_center_inspection_region, generate_reachable_inspection_waypoints, 
-    assign_waypoints_to_uavs, InspectionMap, run_simulation as run_baseline_simulation
+    assign_waypoints_to_uavs, InspectionMap
 )
 from map_generator import generate_test_map
-
-# pibt core
 from pibt_core import PIBTStepPlanner, project_goal_to_reachable
 
 # ==========================================
-# Simulator based on PIBT (With Task Swapping)
+# 统一的 PIBT Simulator (支持开关 Task Swap)
 # ==========================================
 def run_pibt_simulation(
     num_uavs=8, width=50, height=50, num_obstacles=50, map_seed=42, inflation_radius=0.8,
     max_logical_steps=1000, coverage_radius=3.0, center_region_size=30, waypoint_spacing=None,
-    verbose=False
+    use_task_swap=False, verbose=False
 ):
-    # Initialize map
+    # 初始化地图
     test_circles, test_rectangles, _ = generate_test_map(width=width, height=height, num_obstacles=num_obstacles, seed=map_seed)
     env_map = StaticMap(width, height, circles=test_circles, rectangles=test_rectangles, inflation_radius=inflation_radius)
 
@@ -34,6 +32,7 @@ def run_pibt_simulation(
     inspection_regions = make_center_inspection_region(width, height, center_region_size)
     uav_starts = [start for start, _ in uav_tasks]
 
+    # 生成航点与分配
     inspection_waypoints, _, _ = generate_reachable_inspection_waypoints(
         static_map=env_map, uav_starts=uav_starts, inspection_regions=inspection_regions,
         coverage_radius=coverage_radius, waypoint_spacing=waypoint_spacing
@@ -58,16 +57,16 @@ def run_pibt_simulation(
         })
         inspection_map.update_coverage(start_coord)
 
-    total_resolutions = 0  # Record pibt backtrack
     total_steps = max_logical_steps
+    mode_name = "PIBT (Task Swap)" if use_task_swap else "Basic PIBT"
 
     if verbose:
-        print(f"  [Map {map_seed}] 启动 PIBT 仿真: UAV数量={num_uavs}...")
+        print(f"  [Map {map_seed}] 启动 {mode_name} 仿真: UAV数量={num_uavs}...")
 
-    # Main loop
+    # 主循环
     for t in range(max_logical_steps):
         
-        # 1. Update status
+        # 1. 更新任务到达状态
         for uav in uav_states:
             while uav['wp_idx'] < len(uav['waypoints']):
                 wp = uav['waypoints'][uav['wp_idx']]
@@ -80,58 +79,55 @@ def run_pibt_simulation(
                 uav['is_reached'] = True
 
         # =======================================================
-        # 2. 【核心注入】检测并执行 Task Swapping (任务交换)
+        # 2. 如果开启，执行任务交换 (Task Swapping) 检查
         # =======================================================
-        for i in range(len(uav_states)):
-            for j in range(i + 1, len(uav_states)):
-                u1 = uav_states[i]
-                u2 = uav_states[j]
-                
-                # 如果两人都已经完成任务，则忽略
-                if u1['is_reached'] and u2['is_reached']:
-                    continue
-                
-                # 曼哈顿距离判断是否处于相遇/死锁边缘的邻域 (距离 <= 4)
-                dist_between = abs(u1['pos'][0] - u2['pos'][0]) + abs(u1['pos'][1] - u2['pos'][1])
-                if dist_between <= 4:
-                    t1 = u1['waypoints'][u1['wp_idx']] if u1['wp_idx'] < len(u1['waypoints']) else u1['goal']
-                    t2 = u2['waypoints'][u2['wp_idx']] if u2['wp_idx'] < len(u2['waypoints']) else u2['goal']
+        if use_task_swap:
+            for i in range(len(uav_states)):
+                for j in range(i + 1, len(uav_states)):
+                    u1 = uav_states[i]
+                    u2 = uav_states[j]
                     
-                    # 当前前往各自目标的距离之和
-                    dist_orig = abs(u1['pos'][0] - t1[0]) + abs(u1['pos'][1] - t1[1]) + \
-                                abs(u2['pos'][0] - t2[0]) + abs(u2['pos'][1] - t2[1])
+                    if u1['is_reached'] and u2['is_reached']:
+                        continue
                     
-                    # 如果交换目标后的距离之和更小
-                    dist_swap = abs(u1['pos'][0] - t2[0]) + abs(u1['pos'][1] - t2[1]) + \
-                                abs(u2['pos'][0] - t1[0]) + abs(u2['pos'][1] - t1[1])
-                                
-                    if dist_swap < dist_orig:
-                        # 执行全局任务交换 (剩余 Waypoints 和 最终 Goal)
-                        rem_wp1 = u1['waypoints'][u1['wp_idx']:]
-                        rem_wp2 = u2['waypoints'][u2['wp_idx']:]
+                    # 判断曼哈顿距离
+                    dist_between = abs(u1['pos'][0] - u2['pos'][0]) + abs(u1['pos'][1] - u2['pos'][1])
+                    if dist_between <= 4:
+                        t1 = u1['waypoints'][u1['wp_idx']] if u1['wp_idx'] < len(u1['waypoints']) else u1['goal']
+                        t2 = u2['waypoints'][u2['wp_idx']] if u2['wp_idx'] < len(u2['waypoints']) else u2['goal']
                         
-                        u1['waypoints'] = rem_wp2
-                        u2['waypoints'] = rem_wp1
-                        u1['wp_idx'] = 0
-                        u2['wp_idx'] = 0
+                        dist_orig = abs(u1['pos'][0] - t1[0]) + abs(u1['pos'][1] - t1[1]) + \
+                                    abs(u2['pos'][0] - t2[0]) + abs(u2['pos'][1] - t2[1])
                         
-                        u1['goal'], u2['goal'] = u2['goal'], u1['goal']
-                        
-                        # 重置完成状态 (防止因之前被标记完成而停止移动)
-                        u1['is_reached'] = False
-                        u2['is_reached'] = False
-                        
-                        if verbose:
-                            print(f"    [Step {t}] Task Swapped between UAV {u1['id']} and UAV {u2['id']}")
+                        dist_swap = abs(u1['pos'][0] - t2[0]) + abs(u1['pos'][1] - t2[1]) + \
+                                    abs(u2['pos'][0] - t1[0]) + abs(u2['pos'][1] - t1[1])
+                                    
+                        if dist_swap < dist_orig:
+                            # 交换剩余任务
+                            rem_wp1 = u1['waypoints'][u1['wp_idx']:]
+                            rem_wp2 = u2['waypoints'][u2['wp_idx']:]
+                            
+                            u1['waypoints'] = rem_wp2
+                            u2['waypoints'] = rem_wp1
+                            u1['wp_idx'] = 0
+                            u2['wp_idx'] = 0
+                            
+                            u1['goal'], u2['goal'] = u2['goal'], u1['goal']
+                            
+                            u1['is_reached'] = False
+                            u2['is_reached'] = False
+                            
+                            if verbose:
+                                print(f"    [Step {t}] Task Swapped between UAV {u1['id']} and UAV {u2['id']}")
         # =======================================================
 
-        # 3. Build inputs for PIBT Step Planner
+        # 3. 构建 PIBT 输入
         current_positions = []
         targets = []
         priorities = []
 
         for uav in uav_states:
-            # Task Swap 之后，可能处于已经完成新目标的状态，需要再次校验
+            # Task Swap 后可能需再做一次状态同步
             if not uav['is_reached']:
                 while uav['wp_idx'] < len(uav['waypoints']):
                     wp = uav['waypoints'][uav['wp_idx']]
@@ -150,7 +146,6 @@ def run_pibt_simulation(
             else:
                 target_wp = uav['waypoints'][uav['wp_idx']] if uav['wp_idx'] < len(uav['waypoints']) else uav['goal']
                 target, _ = project_goal_to_reachable(free_grid, uav['pos'], target_wp)
-                
                 priority = abs(uav['pos'][0] - target[0]) + abs(uav['pos'][1] - target[1])
 
             targets.append(target)
@@ -160,10 +155,9 @@ def run_pibt_simulation(
             total_steps = t
             break
 
+        # 执行单步 PIBT
         pibt = PIBTStepPlanner(free_grid, targets, seed=map_seed + t)
-        next_positions, stats = pibt.step(current_positions, priorities)
-        
-        total_resolutions += stats.backtracks 
+        next_positions, _ = pibt.step(current_positions, priorities)
 
         for i, uav in enumerate(uav_states):
             if uav['pos'] != next_positions[i]:
@@ -174,31 +168,31 @@ def run_pibt_simulation(
     coverage = inspection_map.coverage_ratio() * 100.0
     total_path = sum(uav['path_length'] for uav in uav_states)
     avg_path = total_path / num_uavs if num_uavs > 0 else 0
+    max_path = max(uav['path_length'] for uav in uav_states) if num_uavs > 0 else 0
 
     if verbose:
-        print(f"    -> PIBT完成! 覆盖率:{coverage:.1f}%, PIBT回溯化解次数:{total_resolutions}, 总步数:{total_steps}, 平均路径:{avg_path:.1f}")
+        print(f"    -> {mode_name}完成! 覆盖率:{coverage:.1f}%, 总步数:{total_steps}, 最大单机航程:{max_path:.1f}")
 
     return {
         "coverage": coverage,
-        "deadlocks": total_resolutions,
+        "max_path": max_path,     # <-- 替换了原来的 deadlocks
         "total_path": total_path,
         "avg_path": avg_path,
         "total_steps": total_steps
     }
 
 # ==========================================
-# Benchmark & Plotting (Dual comparation)
+# 比较 Benchmark (Basic PIBT vs Task Swap PIBT)
 # ==========================================
 def run_comparison_benchmark(num_maps=5, max_uavs=8):
     print(f"\n==============================================")
-    print(f"🚀 开始核心算法对比基准测试 (Baseline vs PIBT + Task Swap)")
+    print(f"🚀 开始消融实验 (Basic PIBT  vs  PIBT + Task Swap)")
     print(f"   共计 {num_maps} 张随机地图 | 每张跑 1 到 {max_uavs} 架无人机")
     print(f"==============================================\n")
 
-    # 数据结构初始化
-    methods = ["Baseline", "PIBT (Task Swap)"]
+    methods = ["Basic PIBT", "PIBT (Task Swap)"]
     metrics = {
-        m: {u: {"coverage": [], "deadlocks": [], "total_path": [], "avg_path": [], "total_steps": []} 
+        m: {u: {"coverage": [], "max_path": [], "total_path": [], "avg_path": [], "total_steps": []} 
             for u in range(1, max_uavs + 1)}
         for m in methods
     }
@@ -208,15 +202,12 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
         print(f">>> 正在测试 Map {step + 1}/{num_maps} (Seed: {current_seed})")
         
         for num_uavs in range(1, max_uavs + 1):
-            # 1. 跑 Baseline (A* + 停车让行)
-            res_base = run_baseline_simulation(num_uavs=num_uavs, map_seed=current_seed, verbose=False)
-            # 2. 跑 PIBT (加入任务交换)
-            res_pibt = run_pibt_simulation(num_uavs=num_uavs, map_seed=current_seed, verbose=False)
+            res_basic = run_pibt_simulation(num_uavs=num_uavs, map_seed=current_seed, use_task_swap=False, verbose=False)
+            res_swap = run_pibt_simulation(num_uavs=num_uavs, map_seed=current_seed, use_task_swap=True, verbose=False)
             
-            # 记录数据
-            for m_name, res in zip(methods, [res_base, res_pibt]):
+            for m_name, res in zip(methods, [res_basic, res_swap]):
                 metrics[m_name][num_uavs]["coverage"].append(res["coverage"])
-                metrics[m_name][num_uavs]["deadlocks"].append(res["deadlocks"])
+                metrics[m_name][num_uavs]["max_path"].append(res["max_path"]) # <-- 记录新的 Makespan 指标
                 metrics[m_name][num_uavs]["total_path"].append(res["total_path"])
                 metrics[m_name][num_uavs]["avg_path"].append(res["avg_path"])
                 metrics[m_name][num_uavs]["total_steps"].append(res["total_steps"])
@@ -225,43 +216,45 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
 
     x_axis = list(range(1, max_uavs + 1))
     fig, axs = plt.subplots(2, 2, figsize=(18, 10))
-    fig.suptitle(f"MAPF Benchmark: Baseline vs PIBT Task Swap (Averaged over {num_maps} Maps)", fontsize=16)
+    fig.suptitle(f"Ablation Study: Basic PIBT vs PIBT with Task Swap (Averaged over {num_maps} Maps)", fontsize=16)
 
-    colors = {"Baseline": "blue", "PIBT (Task Swap)": "red"}
-    markers = {"Baseline": "o", "PIBT (Task Swap)": "s"}
+    colors = {"Basic PIBT": "gray", "PIBT (Task Swap)": "red"}
+    markers = {"Basic PIBT": "X", "PIBT (Task Swap)": "s"}
+    line_styles = {"Basic PIBT": "--", "PIBT (Task Swap)": "-"}
 
     for m_name in methods:
         c = colors[m_name]
         mk = markers[m_name]
+        ls = line_styles[m_name]
         
         mean_cov = [np.mean(metrics[m_name][u]["coverage"]) for u in x_axis]
         mean_steps = [np.mean(metrics[m_name][u]["total_steps"]) for u in x_axis]
         mean_t_path = [np.mean(metrics[m_name][u]["total_path"]) for u in x_axis]
-        mean_dead = [np.mean(metrics[m_name][u]["deadlocks"]) for u in x_axis]
+        mean_max_path = [np.mean(metrics[m_name][u]["max_path"]) for u in x_axis]
 
-        # 1. 任务完成总时间(Steps) -> 最重要的性能指标
-        axs[0, 0].plot(x_axis, mean_steps, linestyle='-', marker=mk, color=c, label=m_name)
+        # 1. 任务完成总时间(Steps) 
+        axs[0, 0].plot(x_axis, mean_steps, linestyle=ls, marker=mk, color=c, label=m_name)
         axs[0, 0].set_title('Total Mission Time (Steps)')
         axs[0, 0].set_xlabel('Number of UAVs')
         axs[0, 0].set_ylabel('Steps (Lower is better)')
         axs[0, 0].grid(True, linestyle='--', alpha=0.6)
 
-        # 2. 冲突解决/死锁次数
-        axs[0, 1].plot(x_axis, mean_dead, linestyle='-', marker=mk, color=c, label=m_name)
-        axs[0, 1].set_title('Conflicts/Deadlocks Resolved')
+        # 2. Makespan / 最大单机航程 (替代了原本的死锁次数)
+        axs[0, 1].plot(x_axis, mean_max_path, linestyle=ls, marker=mk, color=c, label=m_name)
+        axs[0, 1].set_title('Makespan / Max Single UAV Path Length')
         axs[0, 1].set_xlabel('Number of UAVs')
-        axs[0, 1].set_ylabel('Count')
+        axs[0, 1].set_ylabel('Max Distance (Lower is better)')
         axs[0, 1].grid(True, linestyle='--', alpha=0.6)
 
         # 3. 总巡航路径
-        axs[1, 0].plot(x_axis, mean_t_path, linestyle='-', marker=mk, color=c, label=m_name)
+        axs[1, 0].plot(x_axis, mean_t_path, linestyle=ls, marker=mk, color=c, label=m_name)
         axs[1, 0].set_title('Total Path Length')
         axs[1, 0].set_xlabel('Number of UAVs')
-        axs[1, 0].set_ylabel('Distance')
+        axs[1, 0].set_ylabel('Total Distance')
         axs[1, 0].grid(True, linestyle='--', alpha=0.6)
 
-        # 4. 任务覆盖率 (验证任务是否100%完成)
-        axs[1, 1].plot(x_axis, mean_cov, linestyle='-', marker=mk, color=c, label=m_name)
+        # 4. 任务覆盖率 
+        axs[1, 1].plot(x_axis, mean_cov, linestyle=ls, marker=mk, color=c, label=m_name)
         axs[1, 1].set_title('Task Coverage Ratio (%)')
         axs[1, 1].set_xlabel('Number of UAVs')
         axs[1, 1].set_ylabel('Coverage (%)')
@@ -272,7 +265,7 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
             ax.legend()
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig("pibt_vs_baseline.png", dpi=300)
+    plt.savefig("pibt_ablation_task_swap.png", dpi=300)
     plt.show()
 
 if __name__ == "__main__":
