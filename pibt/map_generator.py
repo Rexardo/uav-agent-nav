@@ -175,6 +175,8 @@ def visualize_generated_maps(num_maps=5, width=50, height=50, num_obstacles=50, 
     plt.tight_layout()
     plt.show()
 
-
+# =============================
+# Test code and visualization
+# =============================
 if __name__ == "__main__":
     visualize_generated_maps(num_maps=5, width=50, height=50, num_obstacles=50, seed=None)

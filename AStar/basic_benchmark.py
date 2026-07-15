@@ -12,6 +12,7 @@ from map_generator import generate_test_map
 # Static map and UAV parameters
 # ==========================================
 class StaticMap:
+    """Static map class"""
     def __init__(self, width, height, circles=None, rectangles=None, inflation_radius=0.0):
         self.width = width
         self.height = height
@@ -22,6 +23,16 @@ class StaticMap:
         self.grid_map = self._generate_grid()
 
     def _generate_grid(self):
+        """
+        Generate 2D grid map
+        
+        Discrete obstacles (Rectangles and circles) into grid map, and apply
+        inflation radius for safe distance.
+
+        Return:
+        height * width grid map, 
+        1 = obstacle, 0 = passable
+        """
         grid = [[0 for _ in range(self.width)] for _ in range(self.height)]
         for y in range(self.height):
             for x in range(self.width):
@@ -39,6 +50,23 @@ class StaticMap:
 
 
 def make_center_inspection_region(width, height, region_size=30):
+    """
+    Set a centered square inspection region
+    
+    Args:
+        width (int): Total width of the parent map
+        height (int): TOtal height of the parent map
+        region_size (int, optional): width & height of the region. Defaults to 30.
+
+    Returns:
+        list of tuple: A single-element list containing a tuple of 4 integers:
+            [(x_min, y_min, region_width, region_height)]
+            where:
+            - x_min (int): The starting horizontal coordinate of the region.
+            - y_min (int): The starting vertical coordinate of the region.
+            - region_width (int): The width of the region (equal to region_size).
+            - region_height (int): The height of the region (equal to region_size).
+        """
     x_min = (width - region_size) // 2
     y_min = (height - region_size) // 2
     return [(x_min, y_min, region_size, region_size)]
@@ -52,6 +80,25 @@ def is_in_inspection_regions(x, y, inspection_regions):
 
 
 def compute_reachable_mask(static_map, starts):
+    """Computes a 2D boolean mask of reachable grid cells from given starting points.
+
+    This function performs a 4-directional Breadth-First Search (BFS) starting 
+    from a set of initial coordinates. It traverses only free space (value 0) 
+    and stops at obstacles (value 1) or map boundaries.
+
+    Args:
+        static_map: An object representing the 2D environment. It must have:
+            - static_map.width (int): Width of the grid.
+            - static_map.height (int): Height of the grid.
+            - static_map.grid_map (2D array-like): A 2D grid representing the map, 
+              where 0 represents traversable free space and 1 represents obstacles.
+        starts (iterable of tuples/lists): A list of starting positions, where each 
+            position is a sequence of float or integer coordinates: (x, y).
+
+    Returns:
+        np.ndarray: A 2D boolean numpy array of shape (height, width). Cells set 
+        to True are reachable from at least one of the starting points.
+    """
     reachable = np.zeros((static_map.height, static_map.width), dtype=bool)
     queue = deque()
 
@@ -62,9 +109,7 @@ def compute_reachable_mask(static_map, starts):
                 reachable[sy, sx] = True
                 queue.append((sx, sy))
 
-    # ==========================================
-    # 核心修改点：把 8 连通改为 4 连通
-    # ==========================================
+    # Four directions
     motions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 
     while queue:
@@ -395,7 +440,8 @@ class UAV:
 
 
 # ==========================================
-# run_simulation (返回数据字典，包含总步数)
+# run_simulation (Return data dictionary, 
+# includes total steps)
 # ==========================================
 def run_simulation(
     num_uavs=8, width=50, height=50, num_obstacles=50, map_seed=42, inflation_radius=0.8,
@@ -428,10 +474,10 @@ def run_simulation(
         inspection_map.update_coverage(uav.pos)
 
     total_deadlocks = 0  
-    total_steps = max_logical_steps  # 默认使用最大步数
+    total_steps = max_logical_steps  # default max step
     
     if verbose:
-        print(f"  [Map {map_seed}] 启动仿真: UAV数量={num_uavs}...")
+        print(f"  [Map {map_seed}] start simulation: UAV quantity={num_uavs}...")
 
     for t in range(max_logical_steps):
         for uav in uavs: uav.plan_reference_path(env_map)
@@ -442,9 +488,9 @@ def run_simulation(
             uav.step_forward()
             inspection_map.update_coverage(uav.pos)
 
-        # 当所有无人机任务结束并成功到达终点时
+        # when all uavs finish their mission and reach the goal point
         if all(uav.is_reached for uav in uavs):
-            total_steps = t + 1  # 记录实际消耗的总步数
+            total_steps = t + 1  # Record total steps
             break
 
     coverage = inspection_map.coverage_ratio() * 100.0
@@ -452,14 +498,14 @@ def run_simulation(
     avg_path = total_path / num_uavs if num_uavs > 0 else 0
 
     if verbose:
-        print(f"    -> 完成! 覆盖率:{coverage:.1f}%, 死锁数:{total_deadlocks}, 总步数:{total_steps}, 平均路径:{avg_path:.1f}")
+        print(f"    -> Complete! Coverage rate:{coverage:.1f}%, Total deadlocks:{total_deadlocks}, Total steps:{total_steps}, Average path:{avg_path:.1f}")
 
     return {
         "coverage": coverage,
         "deadlocks": total_deadlocks,
         "total_path": total_path,
         "avg_path": avg_path,
-        "total_steps": total_steps   # <=== 新增返回总步数
+        "total_steps": total_steps   
     }
 
 
@@ -468,8 +514,8 @@ def run_simulation(
 # ==========================================
 def run_benchmark_and_plot(num_maps=5, max_uavs=8):
     print(f"\n==============================================")
-    print(f"🚀 开始批量基准测试 (Benchmark)")
-    print(f"   共计 {num_maps} 张随机地图 | 每张地图跑 1 到 {max_uavs} 架无人机")
+    print(f"Start benchmark...")
+    print(f"   {num_maps} maps in total | Run 1 to {max_uavs} uavs on each map")
     print(f"==============================================\n")
 
     # Data structure to store results
@@ -480,7 +526,7 @@ def run_benchmark_and_plot(num_maps=5, max_uavs=8):
 
     for step in range(num_maps):
         current_seed = random.randint(0, 999999)
-        print(f">>> 正在测试 Map {step + 1}/{num_maps} (Seed: {current_seed})")
+        print(f">>> Now testing Map {step + 1}/{num_maps} (Seed: {current_seed})")
         
         for num_uavs in range(1, max_uavs + 1):
             results = run_simulation(num_uavs=num_uavs, map_seed=current_seed, verbose=False)
@@ -489,9 +535,9 @@ def run_benchmark_and_plot(num_maps=5, max_uavs=8):
             metrics[num_uavs]["deadlocks"].append(results["deadlocks"])
             metrics[num_uavs]["total_path"].append(results["total_path"])
             metrics[num_uavs]["avg_path"].append(results["avg_path"])
-            metrics[num_uavs]["total_steps"].append(results["total_steps"])  # <=== 保存步数数据
+            metrics[num_uavs]["total_steps"].append(results["total_steps"])  
 
-    print("\n✅ 所有测试运行完毕，正在生成图表...")
+    print("\n All tests completed, generating plots...")
 
     x_axis = list(range(1, max_uavs + 1))
     
@@ -507,8 +553,8 @@ def run_benchmark_and_plot(num_maps=5, max_uavs=8):
     mean_avg_path = [np.mean(metrics[u]["avg_path"]) for u in x_axis]
     std_avg_path = [np.std(metrics[u]["avg_path"]) for u in x_axis]
 
-    mean_steps = [np.mean(metrics[u]["total_steps"]) for u in x_axis]        # <=== 聚合步数均值
-    std_steps = [np.std(metrics[u]["total_steps"]) for u in x_axis]          # <=== 聚合步数标准差
+    mean_steps = [np.mean(metrics[u]["total_steps"]) for u in x_axis]       
+    std_steps = [np.std(metrics[u]["total_steps"]) for u in x_axis]          
 
     # Plotting 
     fig, axs = plt.subplots(2, 2, figsize=(18, 10))
@@ -521,7 +567,7 @@ def run_benchmark_and_plot(num_maps=5, max_uavs=8):
     axs[0, 0].set_ylabel('Coverage (%)')
     axs[0, 0].grid(True, linestyle='--', alpha=0.6)
 
-    # 2. Total Steps (Makespan)  <=== 新增步数折线图
+    # 2. Total Steps (Makespan)  
     axs[0, 1].plot(x_axis, mean_steps, '-o', color='orange')
     axs[0, 1].set_title('Total Steps (Time)')
     axs[0, 1].set_xlabel('Number of UAVs')

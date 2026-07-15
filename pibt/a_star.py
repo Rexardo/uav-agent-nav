@@ -1,6 +1,5 @@
 import heapq
 import numpy as np
-import matplotlib.pyplot as plt
 
 class Node:
     """Node class"""
@@ -21,8 +20,9 @@ class Node:
 def heuristic(node1, node2):
     """
     Heuristic Function
+    Manhattan distance
     """
-    return np.hypot(node1.x - node2.x, node1.y - node2.y)
+    return abs(node1.x - node2.x) + abs(node1.y - node2.y)
 
 def astar(start_pos, goal_pos, grid_map):
     """
@@ -42,6 +42,7 @@ def astar(start_pos, goal_pos, grid_map):
     
     g_score = { (start_node.x, start_node.y): 0.0 }
 
+    # Four directions
     motions = [
         (0, 1, 1.0), (0, -1, 1.0), (1, 0, 1.0), (-1, 0, 1.0),
     ]
@@ -54,7 +55,7 @@ def astar(start_pos, goal_pos, grid_map):
         current_node = heapq.heappop(open_list)
 
         # If reach goal point
-        if current_node.x == goal_node.x and current_node.y == goal_node.y:
+        if current_node == goal_node:
             path = []
             while current_node is not None:
                 path.append((current_node.x, current_node.y))
@@ -70,12 +71,15 @@ def astar(start_pos, goal_pos, grid_map):
             neighbor_y = current_node.y + motion[1]
             cost = motion[2]
 
+            # Off the map
             if not (0 <= neighbor_x < map_width and 0 <= neighbor_y < map_height):
                 continue
             
+            # Obstacle
             if grid_map[neighbor_y][neighbor_x] == 1:
                 continue
                 
+            # Visited
             if (neighbor_x, neighbor_y) in closed_set:
                 continue
 
@@ -94,7 +98,7 @@ def astar(start_pos, goal_pos, grid_map):
     return []
 
 # ==========================================
-# Test code and visualize
+# Test code
 # ==========================================
 if __name__ == '__main__':
     grid = [[0 for _ in range(20)] for _ in range(20)]
@@ -103,6 +107,8 @@ if __name__ == '__main__':
         grid[i][10] = 1 
     grid[14][11] = 1
     grid[14][12] = 1
+    grid[8][14] = 1
+    grid[8][15] = 1
 
     start = (2, 2)
     goal = (18, 12)
@@ -110,7 +116,7 @@ if __name__ == '__main__':
     path = astar(start, goal, grid)
 
     if path:
-        print("找到路径！长度:", len(path))
+        print("Path found, length:", len(path))
         for y in range(20):
             row_str = ""
             for x in range(20):
@@ -126,4 +132,4 @@ if __name__ == '__main__':
                     row_str += " . "
             print(row_str)
     else:
-        print("未找到路径。")
+        print("Path not found")

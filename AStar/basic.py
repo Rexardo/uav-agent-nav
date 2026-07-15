@@ -243,10 +243,10 @@ class UAV:
         conf_pos = conflict_neighbor['pos']
         
         for spot in candidates:
-            # 指标 A：远离主要冲突无人机
+            # Target A: stay away from conflict uavs
             dist_to_conflict = math.hypot(spot[0] - conf_pos[0], spot[1] - conf_pos[1])
             
-            # 指标 B：远离所有其他邻居无人机
+            # Target B: stay away from other uavs
             min_dist_to_uavs = float('inf')
             if not neighbors_info:
                 min_dist_to_uavs = 0.0
@@ -255,7 +255,7 @@ class UAV:
                 if d < min_dist_to_uavs:
                     min_dist_to_uavs = d
                     
-            # 指标 C：远离所有静态障碍物 (分别计算圆形和方形)
+            # Target C：stay away from all static obstacles
             min_dist_to_obs = float('inf')
             
             for cx, cy, r in static_map.circles:
@@ -277,10 +277,6 @@ class UAV:
             
             # Give higher weight to UAVs and obstacles, make it tend to stop 
             # in the middle of open area 
-            ''' 
-            Problem found: uav will trend to keep close to map edge
-            consider add edge punishment
-            '''
             score = (dist_to_conflict * 1.0) + \
                     (min_dist_to_uavs * 1.5) + \
                     (min_dist_to_obs * 2.0) - \
@@ -418,7 +414,7 @@ def run_simulation(
             plt.pause(0.01)
 
         if all(uav.is_reached for uav in uavs):
-            print(f"所有无人机已在第 {t} 步到达终点！")
+            print(f"All uavs have reached their destination at step {t}.")
             break
 
     plt.ioff()
@@ -430,7 +426,7 @@ if __name__ == "__main__":
         width=50,
         height=50,
         num_obstacles=50,
-        map_seed=42,        # 改成 None 就是每次随机生成不同地图；固定数字则可复现实验
+        map_seed=None,        
         inflation_radius=0.8,
         max_logical_steps=500,
         render_frames_per_step=5,

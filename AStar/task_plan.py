@@ -162,7 +162,7 @@ def assign_waypoints_to_uavs(static_map, waypoints, uav_tasks):
             unassigned.append(wp)
             continue
 
-        # 加入负载均衡权重
+        # Add load to balance weight
         best_i = min(
             candidate_ids,
             key=lambda i: np.linalg.norm(np.array(wp, dtype=float) - np.array(starts[i], dtype=float)) + 20.0 * len(assignments[i + 1])
@@ -237,14 +237,14 @@ class UAV:
         self.is_reached = False
         self.max_speed = 1.0
         
-        self.path_length = 0.0      # 记录无人机行驶的总路径长度
+        self.path_length = 0.0      # Record total path length
 
         self.wait_steps = 0         
         self.is_yielding = False    
         self.yield_timer = 0
         self.history = []        
 
-        self.full_path = [self.pos.copy()] #用来记录最终路径   
+        self.full_path = [self.pos.copy()] # Record final path
 
     def get_distance(self, other_pos):
         return np.linalg.norm(self.pos - other_pos)
@@ -254,7 +254,7 @@ class UAV:
         if self.current_wp_idx < len(self.waypoints):
             return self.waypoints[self.current_wp_idx]
         
-        # 任务做完直接返回目标点
+        # Back to the goal point after completing the mission
         return self.goal
 
     def update_mission_status(self):
@@ -268,7 +268,7 @@ class UAV:
 
         self.inspection_finished = self.current_wp_idx >= len(self.waypoints)
 
-        # 到达统一终点附近直接判定结束
+        # Arrive near the unified end point and judge the end directly.
         if self.inspection_finished and np.linalg.norm(self.pos - self.goal) < 0.5:
             self.is_reached = True
 
@@ -319,7 +319,6 @@ class UAV:
         neighbors_info = []
         for other in all_uavs:
             if other.id != self.id and self.get_distance(other.pos) <= self.comm_range:
-                # 核心修改：在通信中带上 is_reached 状态
                 neighbors_info.append({
                     'id': other.id,
                     'pos': other.pos,
@@ -347,7 +346,7 @@ class UAV:
 
         for step, my_next_pos in enumerate(self.current_path):
             for neighbor in neighbors_info:
-                # 核心修改：无视已经降落（is_reached）的队友，允许互相重叠穿透
+                # Ignore landed neighbors
                 if neighbor.get('is_reached', False):
                     continue
 
@@ -413,7 +412,7 @@ class UAV:
         forbidden_grids = set()
 
         for neighbor in neighbors_info:
-            # 核心修改：在寻找车位时，也无视已经降落的队友
+            # Ignore landed neighbors when finding parking place
             if neighbor.get('is_reached', False):
                 continue
                 
@@ -522,7 +521,7 @@ class UAV:
             self.path_length += np.linalg.norm(self.velocity)
             self.pos = next_step
             
-            self.full_path.append(self.pos.copy()) # 把每一步的坐标都存下来
+            self.full_path.append(self.pos.copy()) 
         else:
             self.velocity = np.array([0.0, 0.0])
 
@@ -530,30 +529,30 @@ class UAV:
 
 def smooth_trajectory(path, num_points=300, smooth_factor=3.0):
     """
-    对离散的网格路径进行 B-样条平滑
-    :param path: 原始路径坐标列表 [(x1,y1), (x2,y2), ...]
-    :param num_points: 平滑后生成的点数
-    :param smooth_factor: 平滑因子(s)，越大越平滑，越小越贴近原折线
+    B-spline smoothing the discrete grid path
+
+    Args:
+        path (list): original coordinates list
+        num_points: points generated after smoothing
+        smooth_factor: smooth factor s, bigger -> smoother
     """
     if len(path) < 3:
         return path
 
-    # 1. 过滤掉相邻距离过近的重复点 (无人机悬停时产生的点会导致 splprep 报错)
+    # Filter duplicate points
     filtered_path = [path[0]]
     for p in path[1:]:
         if np.linalg.norm(np.array(p) - np.array(filtered_path[-1])) > 0.1:
             filtered_path.append(p)
 
-    # 如果过滤后剩下的有效点太少，就降阶或者直接返回原路径
     k = 3 if len(filtered_path) >= 4 else (1 if len(filtered_path) >= 2 else 0)
     if k < 2:
         return filtered_path
 
-    # 2. 提取 x 和 y
+    # Abstract x & y
     x = [p[0] for p in filtered_path]
     y = [p[1] for p in filtered_path]
 
-    # 3. 使用 B-Spline 进行拟合和平滑
     tck, u = splprep([x, y], s=smooth_factor, k=k)
     u_new = np.linspace(u.min(), u.max(), num_points)
     x_new, y_new = splev(u_new, tck, der=0)
@@ -564,7 +563,7 @@ def smooth_trajectory(path, num_points=300, smooth_factor=3.0):
 # main
 # ==========================================
 def run_simulation(
-    num_uavs=8,               # <=== 新增：配置无人机数量参数 (1~8)
+    num_uavs=8,               
     width=50,
     height=50,
     num_obstacles=50,
@@ -597,22 +596,20 @@ def run_simulation(
         inflation_radius=inflation_radius,
     )
 
-    # ===== 核心修改：动态分配 1~8 架无人机的起终点，左右交替排列以确保负载均衡 =====
-    num_uavs = max(1, min(8, num_uavs))  # 安全限制在 1 到 8 之间
+    num_uavs = max(1, min(8, num_uavs))  
     
-    # 预定义所有 8 个可能的位置，格式为 (起点, 终点)
+    # Predefine 8 posible positions
     all_uav_tasks = [
-        ([2, 2], [2, 2]),                                 # UAV 1: 左侧
-        ([width - 3, 2], [width - 3, 2]),                 # UAV 2: 右侧
-        ([2, 5], [2, 2]),                                 # UAV 3: 左侧
-        ([width - 3, 5], [width - 3, 2]),                 # UAV 4: 右侧
-        ([5, 2], [2, 2]),                                 # UAV 5: 左侧
-        ([width - 6, 2], [width - 3, 2]),                 # UAV 6: 右侧
-        ([5, 5], [2, 2]),                                 # UAV 7: 左侧
-        ([width - 6, 5], [width - 3, 2]),                 # UAV 8: 右侧
+        ([2, 2], [2, 2]),                                 
+        ([width - 3, 2], [width - 3, 2]),                 
+        ([2, 5], [2, 2]),                                 
+        ([width - 3, 5], [width - 3, 2]),                 
+        ([5, 2], [2, 2]),                                 
+        ([width - 6, 2], [width - 3, 2]),                 
+        ([5, 5], [2, 2]),                                 
+        ([width - 6, 5], [width - 3, 2]),                
     ]
 
-    # 根据传入的数量参数，截取对应的任务列表
     uav_tasks = all_uav_tasks[:num_uavs]
     
     print(f"  Initializing {num_uavs} UAV(s)...")
@@ -674,7 +671,7 @@ def run_simulation(
     cmap = plt.get_cmap("tab20")
     fig, ax = plt.subplots(figsize=(8, 8))
 
-    total_deadlocks_resolved = 0  # 记录死锁解决的次数
+    total_deadlocks_resolved = 0  
     sim_finished = False
 
     for t in range(max_logical_steps):
@@ -784,33 +781,33 @@ def run_simulation(
             ax.grid(True)
             plt.pause(0.01)
 
-        # 检查是否全部到达（巡检完毕并且返回到了终点）
+        # All arrived?
         if all(uav.is_reached for uav in uavs):
-            print(f"\n✅ 所有无人机已完成巡检任务并成功返航起点（总计步数: {t}）！")
+            print(f"\n All drones have completed the inspection task and successfully returned to the starting point (Total steps: {t}).")
             sim_finished = True
             break
 
-    # 循环结束后统一输出各项统计指标
+    # Output data
     if not sim_finished:
-        print(f"\n⚠️ 达到最大步数 ({max_logical_steps}) 仿真结束。部分无人机可能未完成任务。")
+        print(f"\n reached max steps ({max_logical_steps}), simulation is killed. Part of uavs may not complete the task")
         current_coverage = inspection_map.coverage_ratio()
 
-    print(f"地图种子：{map_seed}")
-    print(f"最终覆盖率：{current_coverage * 100:.2f}%")
-    print(f"总计解决死锁次数：{total_deadlocks_resolved}")
+    print(f"Map seed: {map_seed}")
+    print(f"Coverage rate: {current_coverage * 100:.2f}%")
+    print(f"Number of deadlocks: {total_deadlocks_resolved}")
     print("-" * 30)
     tt_length = 0
     for uav in uavs:
-        print(f"UAV {uav.id} 巡航总路径长度: {uav.path_length:.2f}")
+        print(f"UAV {uav.id} path length: {uav.path_length:.2f}")
         tt_length += uav.path_length
 
-    print(f"总巡航路径长度: {tt_length:.2f}")
+    print(f"Total path length: {tt_length:.2f}")
 
     plt.ioff()
     
     fig_final, ax_final = plt.subplots(figsize=(8, 8))
     
-    # 绘制静态障碍物
+    # Draw static obstacles
     for rx, ry, rw, rh in env_map.rectangles:
         ax_final.add_patch(
             patches.Rectangle((rx, ry), rw, rh, linewidth=1, edgecolor='black', facecolor='gray', alpha=0.5)
@@ -818,34 +815,27 @@ def run_simulation(
     for cx, cy, r in env_map.circles:
         ax_final.add_patch(plt.Circle((cx, cy), r, color='gray', alpha=0.5))
         
-    # 绘制巡检区域边界
+    # Draw boundary of inspection region
     for rx, ry, rw, rh in inspection_regions:
         ax_final.add_patch(
             patches.Rectangle((rx, ry), rw, rh, linewidth=2, edgecolor='green', facecolor='none', linestyle='--')
         )
 
-    # 绘制所有 UAV 的完整路径
+    # Draw complete paths
     for uav in uavs:
         color = cmap((uav.id - 1) % 20)
         if len(uav.full_path) > 1:
-            # === 调用平滑函数 ===
+            # Smooth
             smoothed_path = smooth_trajectory(uav.full_path, num_points=300, smooth_factor=5.0)
             
-            # 提取平滑后的坐标
             spx = [p[0] for p in smoothed_path]
             spy = [p[1] for p in smoothed_path]
             
-            # 提取原始起终点坐标
             px = [p[0] for p in uav.full_path]
             py = [p[1] for p in uav.full_path]
 
-            # 画平滑后的优美曲线
             ax_final.plot(spx, spy, '-', color=color, linewidth=2, label=f'UAV {uav.id}')
             
-            # （可选）如果你想看看原始的网格折线做对比，可以把下面这行取消注释
-            # ax_final.plot(px, py, ':', color=color, linewidth=1, alpha=0.5)
-
-            # 标记起点(实心圆)和终点(叉)
             ax_final.plot(px[0], py[0], 'o', color=color, markersize=6)
             ax_final.plot(px[-1], py[-1], 'x', color=color, markersize=8)
 
@@ -854,10 +844,8 @@ def run_simulation(
     ax_final.set_aspect('equal')
     ax_final.set_title("Final Trajectories of All UAVs")
     
-    # 将图例放在图外避免遮挡路线
     ax_final.legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
     ax_final.grid(True)
-    # ==========================================
 
     plt.show()
 

@@ -1,5 +1,6 @@
 import argparse
 import random
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -38,8 +39,7 @@ def run_pibt_simulation(
         coverage_radius=coverage_radius, waypoint_spacing=waypoint_spacing
     )
     waypoint_assignments, _ = assign_waypoints_to_uavs(env_map, inspection_waypoints, uav_tasks)
-    inspection_map = InspectionMap(env_map, inspection_regions, coverage_radius)
-
+    
     free_grid = (np.array(env_map.grid_map) == 0)
 
     uav_states = []
@@ -55,7 +55,6 @@ def run_pibt_simulation(
             'path_length': 0.0,
             'is_reached': False
         })
-        inspection_map.update_coverage(start_coord)
 
     total_steps = max_logical_steps
     mode_name = "PIBT (Task Swap)" if use_task_swap else "Basic PIBT"
@@ -63,9 +62,10 @@ def run_pibt_simulation(
     if verbose:
         print(f"  [Map {map_seed}] 启动 {mode_name} 仿真: UAV数量={num_uavs}...")
 
-    # 主循环
+    # === 开始核心计时 ===
+    start_time = time.perf_counter()
+
     for t in range(max_logical_steps):
-        
         # 1. 更新任务到达状态
         for uav in uav_states:
             while uav['wp_idx'] < len(uav['waypoints']):
@@ -74,13 +74,10 @@ def run_pibt_simulation(
                     uav['wp_idx'] += 1
                 else:
                     break
-
             if uav['wp_idx'] >= len(uav['waypoints']) and uav['pos'] == uav['goal']:
                 uav['is_reached'] = True
 
-        # =======================================================
-        # 2. 如果开启，执行任务交换 (Task Swapping) 检查
-        # =======================================================
+        # 2. 执行任务交换 (Task Swapping) 检查
         if use_task_swap:
             for i in range(len(uav_states)):
                 for j in range(i + 1, len(uav_states)):
@@ -106,20 +103,13 @@ def run_pibt_simulation(
                             # 交换剩余任务
                             rem_wp1 = u1['waypoints'][u1['wp_idx']:]
                             rem_wp2 = u2['waypoints'][u2['wp_idx']:]
-                            
                             u1['waypoints'] = rem_wp2
                             u2['waypoints'] = rem_wp1
                             u1['wp_idx'] = 0
                             u2['wp_idx'] = 0
-                            
                             u1['goal'], u2['goal'] = u2['goal'], u1['goal']
-                            
                             u1['is_reached'] = False
                             u2['is_reached'] = False
-                            
-                            if verbose:
-                                print(f"    [Step {t}] Task Swapped between UAV {u1['id']} and UAV {u2['id']}")
-        # =======================================================
 
         # 3. 构建 PIBT 输入
         current_positions = []
@@ -127,7 +117,6 @@ def run_pibt_simulation(
         priorities = []
 
         for uav in uav_states:
-            # Task Swap 后可能需再做一次状态同步
             if not uav['is_reached']:
                 while uav['wp_idx'] < len(uav['waypoints']):
                     wp = uav['waypoints'][uav['wp_idx']]
@@ -155,7 +144,6 @@ def run_pibt_simulation(
             total_steps = t
             break
 
-        # 执行单步 PIBT
         pibt = PIBTStepPlanner(free_grid, targets, seed=map_seed + t)
         next_positions, _ = pibt.step(current_positions, priorities)
 
@@ -163,22 +151,21 @@ def run_pibt_simulation(
             if uav['pos'] != next_positions[i]:
                 uav['path_length'] += np.linalg.norm(np.array(uav['pos']) - np.array(next_positions[i]))
                 uav['pos'] = next_positions[i]
-            inspection_map.update_coverage(uav['pos'])
 
-    coverage = inspection_map.coverage_ratio() * 100.0
-    total_path = sum(uav['path_length'] for uav in uav_states)
-    avg_path = total_path / num_uavs if num_uavs > 0 else 0
+    # === 结束核心计时 ===
+    runtime_sec = time.perf_counter() - start_time
+    total_time_cost = total_steps + runtime_sec
+
     max_path = max(uav['path_length'] for uav in uav_states) if num_uavs > 0 else 0
 
     if verbose:
-        print(f"    -> {mode_name}完成! 覆盖率:{coverage:.1f}%, 总步数:{total_steps}, 最大单机航程:{max_path:.1f}")
+        print(f"    -> {mode_name}完成! 步数:{total_steps}, 运行耗时:{runtime_sec:.4f}s, 总代价:{total_time_cost:.2f}")
 
     return {
-        "coverage": coverage,
-        "max_path": max_path,     # <-- 替换了原来的 deadlocks
-        "total_path": total_path,
-        "avg_path": avg_path,
-        "total_steps": total_steps
+        "max_path": max_path,     
+        "total_steps": total_steps,
+        "runtime": runtime_sec,
+        "total_time_cost": total_time_cost
     }
 
 # ==========================================
@@ -192,7 +179,7 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
 
     methods = ["Basic PIBT", "PIBT (Task Swap)"]
     metrics = {
-        m: {u: {"coverage": [], "max_path": [], "total_path": [], "avg_path": [], "total_steps": []} 
+        m: {u: {"max_path": [], "total_steps": [], "runtime": [], "total_time_cost": []} 
             for u in range(1, max_uavs + 1)}
         for m in methods
     }
@@ -206,17 +193,16 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
             res_swap = run_pibt_simulation(num_uavs=num_uavs, map_seed=current_seed, use_task_swap=True, verbose=False)
             
             for m_name, res in zip(methods, [res_basic, res_swap]):
-                metrics[m_name][num_uavs]["coverage"].append(res["coverage"])
-                metrics[m_name][num_uavs]["max_path"].append(res["max_path"]) # <-- 记录新的 Makespan 指标
-                metrics[m_name][num_uavs]["total_path"].append(res["total_path"])
-                metrics[m_name][num_uavs]["avg_path"].append(res["avg_path"])
+                metrics[m_name][num_uavs]["max_path"].append(res["max_path"]) 
                 metrics[m_name][num_uavs]["total_steps"].append(res["total_steps"])
+                metrics[m_name][num_uavs]["runtime"].append(res["runtime"])
+                metrics[m_name][num_uavs]["total_time_cost"].append(res["total_time_cost"])
 
     print("\n✅ 所有测试运行完毕，正在生成对比图表...")
 
     x_axis = list(range(1, max_uavs + 1))
     fig, axs = plt.subplots(2, 2, figsize=(18, 10))
-    fig.suptitle(f"Ablation Study: Basic PIBT vs PIBT with Task Swap (Averaged over {num_maps} Maps)", fontsize=16)
+    fig.suptitle(f"Ablation Study: Basic vs Task Swap PIBT (Averaged over {num_maps} Maps)", fontsize=16)
 
     colors = {"Basic PIBT": "gray", "PIBT (Task Swap)": "red"}
     markers = {"Basic PIBT": "X", "PIBT (Task Swap)": "s"}
@@ -227,37 +213,37 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
         mk = markers[m_name]
         ls = line_styles[m_name]
         
-        mean_cov = [np.mean(metrics[m_name][u]["coverage"]) for u in x_axis]
         mean_steps = [np.mean(metrics[m_name][u]["total_steps"]) for u in x_axis]
-        mean_t_path = [np.mean(metrics[m_name][u]["total_path"]) for u in x_axis]
+        mean_runtime = [np.mean(metrics[m_name][u]["runtime"]) for u in x_axis]
         mean_max_path = [np.mean(metrics[m_name][u]["max_path"]) for u in x_axis]
+        mean_cost = [np.mean(metrics[m_name][u]["total_time_cost"]) for u in x_axis]
 
-        # 1. 任务完成总时间(Steps) 
+        # 1. 任务完成总逻辑步数(Steps) 
         axs[0, 0].plot(x_axis, mean_steps, linestyle=ls, marker=mk, color=c, label=m_name)
-        axs[0, 0].set_title('Total Mission Time (Steps)')
+        axs[0, 0].set_title('Logical Mission Time (Steps)')
         axs[0, 0].set_xlabel('Number of UAVs')
-        axs[0, 0].set_ylabel('Steps (Lower is better)')
+        axs[0, 0].set_ylabel('Steps')
         axs[0, 0].grid(True, linestyle='--', alpha=0.6)
 
-        # 2. Makespan / 最大单机航程 (替代了原本的死锁次数)
-        axs[0, 1].plot(x_axis, mean_max_path, linestyle=ls, marker=mk, color=c, label=m_name)
-        axs[0, 1].set_title('Makespan / Max Single UAV Path Length')
+        # 2. 代码运行时间 (Runtime)
+        axs[0, 1].plot(x_axis, mean_runtime, linestyle=ls, marker=mk, color=c, label=m_name)
+        axs[0, 1].set_title('Code Execution Time (Seconds)')
         axs[0, 1].set_xlabel('Number of UAVs')
-        axs[0, 1].set_ylabel('Max Distance (Lower is better)')
+        axs[0, 1].set_ylabel('Real Time (s)')
         axs[0, 1].grid(True, linestyle='--', alpha=0.6)
 
-        # 3. 总巡航路径
-        axs[1, 0].plot(x_axis, mean_t_path, linestyle=ls, marker=mk, color=c, label=m_name)
-        axs[1, 0].set_title('Total Path Length')
+        # 3. Makespan / 木桶的最短板
+        axs[1, 0].plot(x_axis, mean_max_path, linestyle=ls, marker=mk, color=c, label=m_name)
+        axs[1, 0].set_title('Makespan (Max Single UAV Path Length)')
         axs[1, 0].set_xlabel('Number of UAVs')
-        axs[1, 0].set_ylabel('Total Distance')
+        axs[1, 0].set_ylabel('Max Distance')
         axs[1, 0].grid(True, linestyle='--', alpha=0.6)
 
-        # 4. 任务覆盖率 
-        axs[1, 1].plot(x_axis, mean_cov, linestyle=ls, marker=mk, color=c, label=m_name)
-        axs[1, 1].set_title('Task Coverage Ratio (%)')
+        # 4. 真实仿真延迟 (Total Time Cost = Steps + Runtime)
+        axs[1, 1].plot(x_axis, mean_cost, linestyle=ls, marker=mk, color=c, label=m_name)
+        axs[1, 1].set_title('Total Time Cost (Steps + Runtime)')
         axs[1, 1].set_xlabel('Number of UAVs')
-        axs[1, 1].set_ylabel('Coverage (%)')
+        axs[1, 1].set_ylabel('Cost (Lower is better)')
         axs[1, 1].grid(True, linestyle='--', alpha=0.6)
 
     for ax_row in axs:
@@ -265,7 +251,7 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
             ax.legend()
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig("pibt_ablation_task_swap.png", dpi=300)
+    plt.savefig("pibt_ablation_task_swap_runtime.png", dpi=300)
     plt.show()
 
 if __name__ == "__main__":

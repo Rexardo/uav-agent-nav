@@ -1,6 +1,5 @@
 import heapq
 import numpy as np
-import matplotlib.pyplot as plt
 
 class Node:
     """Node class"""
@@ -27,10 +26,15 @@ def heuristic(node1, node2):
 def astar(start_pos, goal_pos, grid_map):
     """
     A* main function
-    :param start_pos: start point (x, y)
-    :param goal_pos: goal point (x, y)
-    :param grid_map: 2d map, 0 is road, 1 is obstacle
-    :return: path, if no pat return empty []
+
+    Args:
+        start_pos (Node): start point
+        goal_pos (Node): goal point
+        grid_map (list): 2d map, 0 is road, 1 is obstacle
+
+    Returns:
+        List of Node: A list containing Nodes:
+            [Node]
     """
     start_node = Node(start_pos[0], start_pos[1])
     goal_node = Node(goal_pos[0], goal_pos[1])
@@ -110,7 +114,7 @@ if __name__ == '__main__':
     path = astar(start, goal, grid)
 
     if path:
-        print("找到路径！长度:", len(path))
+        print("Path is found! Length:", len(path))
         for y in range(20):
             row_str = ""
             for x in range(20):
@@ -126,4 +130,4 @@ if __name__ == '__main__':
                     row_str += " . "
             print(row_str)
     else:
-        print("未找到路径。")
+        print("Path not found")
