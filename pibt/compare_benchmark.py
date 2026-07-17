@@ -4,14 +4,13 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 
-# 导入 baseline (请确保 basic_benchmark.py 在同目录下)
+# Import baseline benchmark
 from basic_benchmark import (
     StaticMap, make_center_inspection_region, generate_reachable_inspection_waypoints, 
     assign_waypoints_to_uavs, InspectionMap, run_simulation as run_baseline_simulation
 )
 from map_generator import generate_test_map
 
-# 导入 pibt core
 from pibt_core import PIBTStepPlanner, project_goal_to_reachable
 
 # ==========================================
@@ -22,7 +21,7 @@ def run_pibt_simulation(
     max_logical_steps=1000, coverage_radius=3.0, center_region_size=30, waypoint_spacing=None,
     verbose=False
 ):
-    # 初始化地图与任务
+    # init
     test_circles, test_rectangles, _ = generate_test_map(width=width, height=height, num_obstacles=num_obstacles, seed=map_seed)
     env_map = StaticMap(width, height, circles=test_circles, rectangles=test_rectangles, inflation_radius=inflation_radius)
 
@@ -61,9 +60,9 @@ def run_pibt_simulation(
     total_steps = max_logical_steps
 
     if verbose:
-        print(f"  [Map {map_seed}] 启动 PIBT 仿真: UAV数量={num_uavs}...")
+        print(f"  [Map {map_seed}] start PIBT simulation: UAV={num_uavs}...")
 
-    # === 开始核心计时 ===
+    # Record run time
     start_time = time.perf_counter()
 
     for t in range(max_logical_steps):
@@ -107,7 +106,7 @@ def run_pibt_simulation(
                 uav['path_length'] += np.linalg.norm(np.array(uav['pos']) - np.array(next_positions[i]))
                 uav['pos'] = next_positions[i]
 
-    # === 结束核心计时 ===
+    # End run time
     runtime_sec = time.perf_counter() - start_time
     total_time_cost = total_steps + runtime_sec
 
@@ -128,8 +127,8 @@ def run_pibt_simulation(
 # ==========================================
 def run_comparison_benchmark(num_maps=5, max_uavs=8):
     print(f"\n==============================================")
-    print(f"🚀 开始核心算法对比基准测试 (Baseline vs PIBT)")
-    print(f"   共计 {num_maps} 张随机地图 | 每张跑 1 到 {max_uavs} 架无人机")
+    print(f"  Benchmark start)")
+    print(f"   {num_maps} maps in total | run 1 to {max_uavs} uavs on each map")
     print(f"==============================================\n")
 
     methods = ["Baseline", "PIBT"]
@@ -144,7 +143,7 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
         print(f">>> 正在测试 Map {step + 1}/{num_maps} (Seed: {current_seed})")
         
         for num_uavs in range(1, max_uavs + 1):
-            # 1. 跑 Baseline (外部包裹计时)
+            # Baseline runtime
             start_t = time.perf_counter()
             res_base = run_baseline_simulation(num_uavs=num_uavs, map_seed=current_seed, verbose=False)
             runtime_base = time.perf_counter() - start_t
@@ -152,22 +151,22 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
             steps_base = res_base.get("total_steps", 1000)
             cost_base = steps_base + runtime_base
 
-            # 2. 跑 PIBT (内部精准计时)
+            # pibt runtime
             res_pibt = run_pibt_simulation(num_uavs=num_uavs, map_seed=current_seed, verbose=False)
             
-            # 记录 Baseline 数据
+            # Baseline data
             metrics["Baseline"][num_uavs]["total_steps"].append(steps_base)
             metrics["Baseline"][num_uavs]["runtime"].append(runtime_base)
             metrics["Baseline"][num_uavs]["total_path"].append(res_base.get("total_path", 0))
             metrics["Baseline"][num_uavs]["total_time_cost"].append(cost_base)
 
-            # 记录 PIBT 数据
+            # PIBT data
             metrics["PIBT"][num_uavs]["total_steps"].append(res_pibt["total_steps"])
             metrics["PIBT"][num_uavs]["runtime"].append(res_pibt["runtime"])
             metrics["PIBT"][num_uavs]["total_path"].append(res_pibt["total_path"])
             metrics["PIBT"][num_uavs]["total_time_cost"].append(res_pibt["total_time_cost"])
 
-    print("\n✅ 所有测试运行完毕，正在生成对比图表...")
+    print("\n Test complete, generating plot...")
 
     x_axis = list(range(1, max_uavs + 1))
     fig, axs = plt.subplots(2, 2, figsize=(18, 10))
@@ -185,28 +184,28 @@ def run_comparison_benchmark(num_maps=5, max_uavs=8):
         mean_t_path = [np.mean(metrics[m_name][u]["total_path"]) for u in x_axis]
         mean_cost = [np.mean(metrics[m_name][u]["total_time_cost"]) for u in x_axis]
 
-        # 1. 任务完成总逻辑步数(Steps)
+        # Logit steps of the mission
         axs[0, 0].plot(x_axis, mean_steps, linestyle='-', marker=mk, color=c, label=m_name)
         axs[0, 0].set_title('Logical Mission Time (Steps)')
         axs[0, 0].set_xlabel('Number of UAVs')
         axs[0, 0].set_ylabel('Steps')
         axs[0, 0].grid(True, linestyle='--', alpha=0.6)
 
-        # 2. 代码运行时间 (Runtime)
+        # Runtime
         axs[0, 1].plot(x_axis, mean_runtime, linestyle='-', marker=mk, color=c, label=m_name)
         axs[0, 1].set_title('Code Execution Time (Seconds)')
         axs[0, 1].set_xlabel('Number of UAVs')
         axs[0, 1].set_ylabel('Real Time (s)')
         axs[0, 1].grid(True, linestyle='--', alpha=0.6)
 
-        # 3. 总巡航路径
+        # Total path
         axs[1, 0].plot(x_axis, mean_t_path, linestyle='-', marker=mk, color=c, label=m_name)
         axs[1, 0].set_title('Total Path Length')
         axs[1, 0].set_xlabel('Number of UAVs')
         axs[1, 0].set_ylabel('Distance')
         axs[1, 0].grid(True, linestyle='--', alpha=0.6)
 
-        # 4. 真实仿真延迟 (Total Time Cost = Steps + Runtime)
+        # Real delay
         axs[1, 1].plot(x_axis, mean_cost, linestyle='-', marker=mk, color=c, label=m_name)
         axs[1, 1].set_title('Total Time Cost (Steps + Runtime)')
         axs[1, 1].set_xlabel('Number of UAVs')
