@@ -5,6 +5,8 @@ devel/
 install/
 log/
 logs/
+.catkin_tools/
+.catkin_workspace
 
 # ROS runtime files
 *.bag

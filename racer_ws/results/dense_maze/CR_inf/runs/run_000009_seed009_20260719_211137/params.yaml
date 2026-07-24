@@ -1,0 +1,29 @@
+run_id: run_000009_seed009_20260719_211137
+status: complete
+scene: dense_maze
+seed: 9
+communication_range: inf
+drone_num: 4
+idle_state_value: 6
+idle_hold_duration_s: 3
+stationary_hold_duration_s: 30
+stationary_speed_threshold_mps: 0.05
+odom_freshness_timeout_s: 1
+finish_reason: all_stationary
+uav_radius_m: 0.25
+collision_hysteresis_m: 0.05
+turn_sample_distance_m: 0.2
+trajectory_sample_period_s: 0.05
+obstacle_check_period_s: 0.02
+obstacle_min_z_m: 0.25
+coverage_reachable_only: true
+coverage_obstacle_clearance_m: 0.25
+coverage_slice_half_height_m: 0.25
+coverage_seed_search_radius_m: 1
+coverage_denominator_cells: 9422
+coverage_denominator_area_m2: 94.22
+topics:
+  odom_prefix: /state_ukf/odom
+  fsm_state_prefix: /experiment/fsm_state
+  known_grid_prefix: /racer/known_grid
+  global_map: /map_generator/global_cloud

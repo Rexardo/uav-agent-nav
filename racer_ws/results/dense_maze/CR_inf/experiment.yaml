@@ -1,0 +1,7 @@
+scene: dense_maze
+communication_range: inf
+drone_num: 4
+coverage_definition: union of known cells divided by ground-truth reachable free cells at the known-grid height
+turn_angle_definition: pooled XY turning angles after spatial resampling
+collision_definition: contact-entry events with hysteresis
+obstacle_distance_definition: body clearance to the ground-truth wall cloud

@@ -1,0 +1,110 @@
+<launch>
+  <!-- Dense-maze PCD bounds are approximately x=[-6.8, 7.0], y=[-4.6, 4.6]. -->
+  <arg name="map_size_x" value="16.0"/>
+  <arg name="map_size_y" value="12.0"/>
+  <arg name="map_size_z" value=" 3.5"/>
+
+  <arg name="odom_prefix" value="/state_ukf/odom" />
+  <arg name="drone_num" value="5" />
+  <!-- Experiment recorder parameters. The simulator still starts four physical UAVs. -->
+  <arg name="record_metrics" default="true" />
+  <arg name="metrics_drone_num" default="4" />
+  <arg name="metrics_seed" default="0" />
+  <arg name="metrics_scene" default="dense_maze" />
+  <!-- Metadata/output grouping only; stock RACER uses its original communication setup. -->
+  <arg name="metrics_communication_range" default="-1.0" />
+  <arg name="metrics_output_root" default="$(env HOME)/racer_ws/results" />
+  <!-- Keep this requested dense-maze viewpoint threshold. -->
+  <arg name="min_visib_num" default="5" />
+
+  <!-- Fixed dense-maze point cloud. -->
+  <node pkg="map_generator" name="map_pub" type="map_pub" output="screen"
+        args="$(find map_generator)/resource/dense_maze.pcd">
+  </node>
+
+  <!-- Four drones form a horizontal row in the left staging area. -->
+  <include file="$(find exploration_manager)/launch/single_drone_exploration.xml">
+    <arg name="drone_id" value="1"/>
+    <arg name="init_x" value="-5"/>
+    <arg name="init_y" value="-1.5"/>
+    <arg name="init_z" value="1"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/>
+    <arg name="map_size_y" value="$(arg map_size_y)"/>
+    <arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="odom_prefix" value="$(arg odom_prefix)"/>
+    <arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="min_visib_num" value="$(arg min_visib_num)"/>
+    <arg name="simulation" default="true"/>
+  </include>
+
+  <include file="$(find exploration_manager)/launch/single_drone_exploration.xml">
+    <arg name="drone_id" value="2"/>
+    <arg name="init_x" value="-5"/>
+    <arg name="init_y" value="-0.5"/>
+    <arg name="init_z" value="1"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/>
+    <arg name="map_size_y" value="$(arg map_size_y)"/>
+    <arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="odom_prefix" value="$(arg odom_prefix)"/>
+    <arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="min_visib_num" value="$(arg min_visib_num)"/>
+    <arg name="simulation" default="true"/>
+  </include>
+
+  <include file="$(find exploration_manager)/launch/single_drone_exploration.xml">
+    <arg name="drone_id" value="3"/>
+    <arg name="init_x" value="-5"/>
+    <arg name="init_y" value="0.5"/>
+    <arg name="init_z" value="1"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/>
+    <arg name="map_size_y" value="$(arg map_size_y)"/>
+    <arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="odom_prefix" value="$(arg odom_prefix)"/>
+    <arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="min_visib_num" value="$(arg min_visib_num)"/>
+    <arg name="simulation" default="true"/>
+  </include>
+
+  <include file="$(find exploration_manager)/launch/single_drone_exploration.xml">
+    <arg name="drone_id" value="4"/>
+    <arg name="init_x" value="-5"/>
+    <arg name="init_y" value="1.5"/>
+    <arg name="init_z" value="1"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/>
+    <arg name="map_size_y" value="$(arg map_size_y)"/>
+    <arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="odom_prefix" value="$(arg odom_prefix)"/>
+    <arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="min_visib_num" value="$(arg min_visib_num)"/>
+    <arg name="simulation" default="true"/>
+  </include>
+
+  <node pkg="experiment_metrics" type="experiment_metrics_node" name="experiment_metrics"
+        output="screen" if="$(arg record_metrics)">
+    <param name="drone_num" value="$(arg metrics_drone_num)" />
+    <param name="scene" value="$(arg metrics_scene)" />
+    <param name="communication_range" value="$(arg metrics_communication_range)" />
+    <param name="seed" value="$(arg metrics_seed)" />
+    <param name="output_root" value="$(arg metrics_output_root)" />
+    <param name="odom_prefix" value="$(arg odom_prefix)" />
+    <param name="fsm_state_prefix" value="/experiment/fsm_state" />
+    <param name="planning_time_prefix" value="/experiment/planning_time" />
+    <param name="known_grid_prefix" value="/racer/known_grid" />
+    <param name="idle_hold_duration" value="3.0" />
+    <param name="stationary_hold_duration" value="30.0" />
+    <param name="stationary_speed_threshold" value="0.05" />
+    <param name="odom_freshness_timeout" value="1.0" />
+    <param name="uav_radius" value="0.25" />
+    <param name="collision_hysteresis" value="0.05" />
+    <param name="turn_sample_distance" value="0.20" />
+    <param name="trajectory_sample_period" value="0.05" />
+    <param name="obstacle_check_period" value="0.02" />
+    <!-- Ignore the synthetic floor so clearance is measured against walls/obstacles. -->
+    <param name="obstacle_min_z" value="0.25" />
+    <!-- Coverage denominator: collision-free cells connected to the UAV start region. -->
+    <param name="coverage_reachable_only" value="true" />
+    <param name="coverage_obstacle_clearance" value="0.25" />
+    <param name="coverage_slice_half_height" value="0.25" />
+    <param name="coverage_seed_search_radius" value="1.0" />
+  </node>
+</launch>
